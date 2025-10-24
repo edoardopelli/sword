@@ -4,12 +4,15 @@ import com.squareup.javapoet.AnnotationSpec;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
+import com.squareup.javapoet.MethodSpec;
+import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import org.cheetah.sword.events.Events.GenerateRequestedEvent;
 import org.cheetah.sword.events.Events.GenerationCompletedEvent;
 import org.cheetah.sword.model.ConnectionConfig;
 import org.cheetah.sword.model.FkMode;
+import org.cheetah.sword.model.RelationFetch;
 import org.cheetah.sword.model.SchemaSelection;
 import org.cheetah.sword.util.SqlTypeMapper;
 import org.springframework.context.ApplicationEventPublisher;
@@ -26,6 +29,16 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Generates entities, optional DTOs, and optional MapStruct mappers.
+ *
+ * High-level flow:
+ * 1. Read database metadata for all tables in selected catalog/schema.
+ * 2. Build a per-table model (columns, PKs, single-column FKs).
+ * 3. For each table:
+ *    - Generate @Entity class (+ @EmbeddedId when composite PK).
+ *    - Optionally generate DTO class and mapper interface.
+ */
 @Service
 public class GenerationService {
 
@@ -55,20 +68,51 @@ public class GenerationService {
             List<String> tables = metadataService.listTables(connection, catalog, schema);
             System.out.printf("   Found %d table(s).%n", tables.size());
 
-            String basePackage = normalizePackage(cfg.getBasePackage());
+            String entityPackage = normalizePackage(cfg.getBasePackage());
+            String dtoPackage = siblingPackage(entityPackage, "dtos");
+            String mapperPackage = siblingPackage(entityPackage, "mappers");
             Path rootPath = cfg.getOutputPath();
             Files.createDirectories(rootPath);
 
-            System.out.printf("   Output root: %s%n", rootPath.toAbsolutePath());
-            System.out.printf("   Package: %s%n", basePackage);
-            System.out.printf("   FK mode: %s%n", cfg.getFkMode());
+            System.out.printf("   Output root     : %s%n", rootPath.toAbsolutePath());
+            System.out.printf("   Entity package  : %s%n", entityPackage);
+            System.out.printf("   DTO package     : %s%n", dtoPackage);
+            System.out.printf("   Mapper package  : %s%n", mapperPackage);
+            System.out.printf("   FK mode         : %s%n", cfg.getFkMode());
+            System.out.printf("   Relation fetch  : %s%n", cfg.getRelationFetch());
+            System.out.printf("   Generate DTO    : %s%n", cfg.getGenerateDto());
 
             DatabaseMetaData metaData = connection.getMetaData();
             String dbProduct = metaData.getDatabaseProductName();
 
+            // Phase 1: build model for all tables
+            List<EntityModel> models = new ArrayList<>();
             for (String table : tables) {
-                EntityModel model = loadEntityModel(metaData, catalog, schema, table, dbProduct);
-                writeEntityFiles(basePackage, rootPath, model, dbProduct, cfg.getFkMode(), metaData, catalog, schema);
+                EntityModel model = loadEntityModel(
+                        metaData,
+                        catalog,
+                        schema,
+                        table,
+                        dbProduct
+                );
+                models.add(model);
+            }
+
+            // Phase 2: generate per-table code
+            for (EntityModel model : models) {
+                writeEntityFiles(
+                        entityPackage,
+                        dtoPackage,
+                        mapperPackage,
+                        rootPath,
+                        model,
+                        models,
+                        dbProduct,
+                        cfg.getFkMode(),
+                        cfg.getRelationFetch(),
+                        cfg.getGenerateDto(),
+                        metaData
+                );
                 generated++;
             }
 
@@ -82,8 +126,7 @@ public class GenerationService {
     }
 
     /**
-     * Reads table metadata (columns, primary key columns, and foreign keys).
-     * Foreign keys are grouped by FK_NAME. Only single-column foreign keys are modeled.
+     * Reads table metadata (columns, PK columns, single-column FKs).
      */
     private EntityModel loadEntityModel(DatabaseMetaData md,
                                         String catalog,
@@ -94,7 +137,7 @@ public class GenerationService {
         Map<String, ColumnModel> columns = new LinkedHashMap<>();
         Set<String> pkCols = new LinkedHashSet<>();
 
-        // Load columns
+        // Columns
         try (ResultSet rs = md.getColumns(catalog, schema, table, "%")) {
             while (rs.next()) {
                 String name = rs.getString("COLUMN_NAME");
@@ -108,14 +151,14 @@ public class GenerationService {
             }
         }
 
-        // Load primary keys
+        // Primary keys
         try (ResultSet rs = md.getPrimaryKeys(catalog, schema, table)) {
             while (rs.next()) {
                 pkCols.add(rs.getString("COLUMN_NAME"));
             }
         }
 
-        // Load imported foreign keys
+        // Imported foreign keys
         Map<String, List<ImportedFkRow>> fkGroups = new LinkedHashMap<>();
         try (ResultSet rs = md.getImportedKeys(catalog, schema, table)) {
             while (rs.next()) {
@@ -134,7 +177,7 @@ public class GenerationService {
             }
         }
 
-        // Build single-column FK models
+        // Keep only single-column FKs
         List<SimpleFkModel> simpleFks = new ArrayList<>();
         for (List<ImportedFkRow> rows : fkGroups.values()) {
             if (rows.size() == 1) {
@@ -143,24 +186,34 @@ public class GenerationService {
             }
         }
 
-        return new EntityModel(schema, table, columns, pkCols, simpleFks);
+        return new EntityModel(
+                catalog,
+                schema,
+                table,
+                columns,
+                pkCols,
+                simpleFks
+        );
     }
 
     /**
-     * Generates the main @Entity class and, if needed, the @Embeddable Id class.
-     * Applies SCALAR or RELATION FK mode.
+     * Writes:
+     * - Entity class (and EmbeddedId if needed)
+     * - Optional DTO and MapStruct mapper
      */
-    private void writeEntityFiles(String basePackage,
+    private void writeEntityFiles(String entityPackage,
+                                  String dtoPackage,
+                                  String mapperPackage,
                                   Path rootPath,
                                   EntityModel model,
+                                  List<EntityModel> allModels,
                                   String dbProduct,
                                   FkMode fkMode,
-                                  DatabaseMetaData md,
-                                  String catalog,
-                                  String schema) throws IOException {
+                                  RelationFetch relationFetch,
+                                  boolean generateDto,
+                                  DatabaseMetaData md) throws IOException {
 
         String entitySimpleName = namingConfigService.resolveEntityName(model.table());
-        String packageName = basePackage;
 
         boolean compositePk = model.pkCols().size() > 1;
         String idClassName = entitySimpleName + "Id";
@@ -193,8 +246,9 @@ public class GenerationService {
                 .addAnnotation(eqHashAnn)
                 .addAnnotation(generatedAnn);
 
+        // Composite PK
         if (compositePk) {
-            ClassName idClass = ClassName.get(packageName, idClassName);
+            ClassName idClass = ClassName.get(entityPackage, idClassName);
 
             FieldSpec.Builder idField = FieldSpec.builder(idClass, "id", Modifier.PRIVATE)
                     .addAnnotation(ClassName.get("jakarta.persistence", "EmbeddedId"))
@@ -203,44 +257,47 @@ public class GenerationService {
 
             entity.addField(idField.build());
 
-            writeEmbeddedId(packageName, rootPath, idClassName, model, dbProduct, generatedAnn);
+            writeEmbeddedId(entityPackage, rootPath, idClassName, model, dbProduct, generatedAnn);
         }
 
         /*
-         * Relation fields (RELATION mode only).
-         * Each simple FK column can be represented as:
-         * - @OneToOne(fetch = FetchType.LAZY) if the FK column is UNIQUE
-         * - @ManyToOne(fetch = FetchType.LAZY) otherwise
-         * The relation field is not included in equals/hashCode/toString.
+         * Child-side relationships (ManyToOne / OneToOne).
+         * Only if fkMode == RELATION.
          */
         Set<String> handledFkColumns = new HashSet<>();
-        List<FieldSpec> relationFields = new ArrayList<>();
+        List<FieldSpec> relationFieldsChildSide = new ArrayList<>();
 
         if (fkMode == FkMode.RELATION) {
             for (SimpleFkModel fk : model.simpleFks()) {
                 String localCol = fk.localColumn();
 
                 if (model.pkCols().contains(localCol)) {
-                    // Primary key columns are not replaced by relations in this step
                     continue;
                 }
 
                 String targetEntityName = namingConfigService.resolveEntityName(fk.targetTable());
-                ClassName targetType = ClassName.get(packageName, targetEntityName);
-
+                ClassName targetType = ClassName.get(entityPackage, targetEntityName);
                 String relFieldName = lowerFirst(targetEntityName);
 
-                boolean unique = isColumnUnique(md, catalog, model.schema(), model.table(), localCol);
+                boolean unique = isColumnUnique(
+                        md,
+                        model.catalog(),
+                        model.schema(),
+                        model.table(),
+                        localCol
+                );
 
-                AnnotationSpec relationAnn;
+                AnnotationSpec.Builder relationAnn;
                 if (unique) {
                     relationAnn = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "OneToOne"))
-                            .addMember("fetch", "$T.LAZY", ClassName.get("jakarta.persistence", "FetchType"))
-                            .build();
+                            .addMember("fetch", "$T.$L",
+                                    ClassName.get("jakarta.persistence", "FetchType"),
+                                    relationFetch == RelationFetch.EAGER ? "EAGER" : "LAZY");
                 } else {
                     relationAnn = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "ManyToOne"))
-                            .addMember("fetch", "$T.LAZY", ClassName.get("jakarta.persistence", "FetchType"))
-                            .build();
+                            .addMember("fetch", "$T.$L",
+                                    ClassName.get("jakarta.persistence", "FetchType"),
+                                    relationFetch == RelationFetch.EAGER ? "EAGER" : "LAZY");
                 }
 
                 AnnotationSpec joinColAnn = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "JoinColumn"))
@@ -248,21 +305,18 @@ public class GenerationService {
                         .build();
 
                 FieldSpec.Builder relField = FieldSpec.builder(targetType, relFieldName, Modifier.PRIVATE)
-                        .addAnnotation(relationAnn)
+                        .addAnnotation(relationAnn.build())
                         .addAnnotation(joinColAnn);
 
-                relationFields.add(relField.build());
+                relationFieldsChildSide.add(relField.build());
                 handledFkColumns.add(localCol);
             }
         }
 
         /*
-         * Scalar fields for columns.
-         * Skip columns that were already modeled as relation fields (RELATION mode),
-         * except if the FK column is also the simple primary key.
-         * Skip PK columns if composite PK is used, because those are emitted
-         * inside the @Embeddable <EntityName>Id class.
-         * For single-column PKs, emit @Id and, if applicable, @GeneratedValue.
+         * Scalar fields:
+         * - all physical columns except those replaced by relation fields (FkMode.RELATION)
+         * - skip PK parts if compositePk, because EmbeddedId already has them
          */
         for (ColumnModel col : model.columns().values()) {
 
@@ -273,11 +327,11 @@ public class GenerationService {
             }
 
             if (compositePk && model.pkCols().contains(col.name())) {
-                // Composite PK columns already live in the <EntityName>Id embedded class
                 continue;
             }
 
             String fieldName = namingConfigService.resolveColumnName(model.table(), col.name());
+
             TypeName javaType = SqlTypeMapper.map(
                     col.dataType(),
                     col.typeName(),
@@ -350,22 +404,259 @@ public class GenerationService {
             entity.addField(field.build());
         }
 
-        // Append relation fields after scalar fields
-        for (FieldSpec relField : relationFields) {
+        // Add relation fields on child side
+        for (FieldSpec relField : relationFieldsChildSide) {
             entity.addField(relField);
         }
 
-        // Write main entity file
-        JavaFile.builder(packageName, entity.build())
+        /*
+         * Parent-side inverse relationships:
+         * - @OneToOne(mappedBy="...") for unique FK
+         * - @OneToMany(mappedBy="...") Set<ChildEntity> for non-unique FK
+         * These are only generated if fkMode == RELATION.
+         */
+        if (fkMode == FkMode.RELATION) {
+            List<FieldSpec> inverseFields = buildInverseRelationFields(
+                    model,
+                    allModels,
+                    entityPackage,
+                    md,
+                    relationFetch
+            );
+            for (FieldSpec invField : inverseFields) {
+                entity.addField(invField);
+            }
+        }
+
+        // Write entity source
+        JavaFile.builder(entityPackage, entity.build())
+                .build()
+                .writeTo(rootPath);
+
+        // If composite PK, EmbeddedId source is already handled above.
+
+        /*
+         * DTO + Mapper generation (optional).
+         * DTOs are generated under <parent>.dtos
+         * Mappers are generated under <parent>.mappers
+         */
+        if (generateDto) {
+            writeDtoAndMapper(
+                    entityPackage,
+                    dtoPackage,
+                    mapperPackage,
+                    rootPath,
+                    model,
+                    dbProduct,
+                    entitySimpleName,
+                    generatedAnn
+            );
+        }
+    }
+
+    /**
+     * Generates:
+     * 1. <EntityName>Dto
+     * 2. <EntityName>Mapper
+     *
+     * DTO rules:
+     * - One field per physical DB column.
+     * - FK columns stay as scalar ids.
+     * - No JPA annotations.
+     * - Collections are not included.
+     *
+     * Mapper rules:
+     * - @Mapper(componentModel = "spring")
+     * - toDto(Entity -> Dto)
+     * - toEntity(Dto -> Entity)
+     *
+     * Note: In RELATION mode, entity fields like "Customer customer" will not
+     * be populated by toEntity() because the DTO only carries "customerId".
+     * Those relation fields remain null unless later enriched manually.
+     */
+    private void writeDtoAndMapper(String entityPackage,
+                                   String dtoPackage,
+                                   String mapperPackage,
+                                   Path rootPath,
+                                   EntityModel model,
+                                   String dbProduct,
+                                   String entitySimpleName,
+                                   AnnotationSpec generatedAnn) throws IOException {
+
+        String dtoSimpleName = entitySimpleName + "Dto";
+
+        AnnotationSpec toStringAnn = AnnotationSpec.builder(ClassName.get("lombok", "ToString"))
+                .addMember("onlyExplicitlyIncluded", "$L", true)
+                .build();
+
+        AnnotationSpec eqHashAnn = AnnotationSpec.builder(ClassName.get("lombok", "EqualsAndHashCode"))
+                .addMember("onlyExplicitlyIncluded", "$L", true)
+                .build();
+
+        // DTO class
+        TypeSpec.Builder dto = TypeSpec.classBuilder(dtoSimpleName)
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(ClassName.get("lombok", "Data"))
+                .addAnnotation(ClassName.get("lombok", "NoArgsConstructor"))
+                .addAnnotation(ClassName.get("lombok", "AllArgsConstructor"))
+                .addAnnotation(ClassName.get("lombok", "Builder"))
+                .addAnnotation(toStringAnn)
+                .addAnnotation(eqHashAnn)
+                .addAnnotation(generatedAnn);
+
+        // Add every DB column as a DTO field
+        for (ColumnModel col : model.columns().values()) {
+            String fieldName = namingConfigService.resolveColumnName(model.table(), col.name());
+
+            TypeName javaType = SqlTypeMapper.map(
+                    col.dataType(),
+                    col.typeName(),
+                    col.nullable(),
+                    dbProduct
+            );
+
+            FieldSpec.Builder f = FieldSpec.builder(javaType, fieldName, Modifier.PRIVATE)
+                    .addAnnotation(ClassName.get("lombok", "ToString").nestedClass("Include"))
+                    .addAnnotation(ClassName.get("lombok", "EqualsAndHashCode").nestedClass("Include"));
+
+            dto.addField(f.build());
+        }
+
+        JavaFile.builder(dtoPackage, dto.build())
+                .build()
+                .writeTo(rootPath);
+
+        /*
+         * Mapper interface.
+         * Example generated:
+         *
+         * @Mapper(componentModel = "spring")
+         * @Generated(...)
+         * public interface IncidentMapper {
+         *     IncidentDto toDto(Incident entity);
+         *     Incident toEntity(IncidentDto dto);
+         * }
+         */
+        AnnotationSpec mapperAnn = AnnotationSpec.builder(ClassName.get("org.mapstruct", "Mapper"))
+                .addMember("componentModel", "$S", "spring")
+                .build();
+
+        MethodSpec toDto = MethodSpec.methodBuilder("toDto")
+                .addModifiers(Modifier.PUBLIC, Modifier.ABSTRACT)
+                .returns(ClassName.get(dtoPackage, dtoSimpleName))
+                .addParameter(ClassName.get(entityPackage, entitySimpleName), "entity")
+                .build();
+
+        MethodSpec toEntity = MethodSpec.methodBuilder("toEntity")
+                .addModifiers(Modifier.PUBLIC, Modifier.ABSTRACT)
+                .returns(ClassName.get(entityPackage, entitySimpleName))
+                .addParameter(ClassName.get(dtoPackage, dtoSimpleName), "dto")
+                .build();
+
+        TypeSpec mapper = TypeSpec.interfaceBuilder(entitySimpleName + "Mapper")
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(mapperAnn)
+                .addAnnotation(generatedAnn)
+                .addMethod(toDto)
+                .addMethod(toEntity)
+                .build();
+
+        JavaFile.builder(mapperPackage, mapper)
                 .build()
                 .writeTo(rootPath);
     }
 
     /**
-     * Generates the <EntityName>Id embeddable class for composite primary keys.
-     * Each PK column becomes a field in the embeddable class.
+     * Builds inverse relation fields for the parent side of a relationship.
+     *
+     * UNIQUE FK in child:
+     *   @OneToOne(mappedBy="...", fetch=FetchType.<cfg>)
+     *   ChildEntity child;
+     *
+     * NON-UNIQUE FK in child:
+     *   @OneToMany(mappedBy="...", fetch=FetchType.LAZY)
+     *   Set<ChildEntity> children;
+     *
+     * Collections are always LAZY.
      */
-    private void writeEmbeddedId(String basePackage,
+    private List<FieldSpec> buildInverseRelationFields(EntityModel parentModel,
+                                                       List<EntityModel> allModels,
+                                                       String entityPackage,
+                                                       DatabaseMetaData md,
+                                                       RelationFetch relationFetch) {
+
+        List<FieldSpec> fields = new ArrayList<>();
+        Set<String> usedFieldNames = new HashSet<>();
+
+        String parentEntityName = namingConfigService.resolveEntityName(parentModel.table());
+        String mappedByNameOnChild = lowerFirst(parentEntityName);
+
+        for (EntityModel childModel : allModels) {
+            if (childModel == parentModel) continue;
+
+            for (SimpleFkModel fk : childModel.simpleFks()) {
+                if (!fk.targetTable().equalsIgnoreCase(parentModel.table())) {
+                    continue;
+                }
+
+                String childEntityName = namingConfigService.resolveEntityName(childModel.table());
+                ClassName childType = ClassName.get(entityPackage, childEntityName);
+
+                boolean unique = isColumnUnique(
+                        md,
+                        childModel.catalog(),
+                        childModel.schema(),
+                        childModel.table(),
+                        fk.localColumn()
+                );
+
+                if (unique) {
+                    // One-to-one back reference
+                    String fieldName = uniquify(
+                            lowerFirst(childEntityName),
+                            usedFieldNames
+                    );
+
+                    AnnotationSpec oneToOneBack = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "OneToOne"))
+                            .addMember("mappedBy", "$S", mappedByNameOnChild)
+                            .addMember("fetch", "$T.$L",
+                                    ClassName.get("jakarta.persistence", "FetchType"),
+                                    relationFetch == RelationFetch.EAGER ? "EAGER" : "LAZY")
+                            .build();
+
+                    FieldSpec.Builder f = FieldSpec.builder(childType, fieldName, Modifier.PRIVATE)
+                            .addAnnotation(oneToOneBack);
+                    fields.add(f.build());
+                } else {
+                    // One-to-many back reference
+                    String pluralBase = lowerFirst(childEntityName) + "s";
+                    String fieldName = uniquify(pluralBase, usedFieldNames);
+
+                    ParameterizedTypeName setOfChild =
+                            ParameterizedTypeName.get(
+                                    ClassName.get(Set.class),
+                                    childType
+                            );
+
+                    AnnotationSpec oneToManyBack = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "OneToMany"))
+                            .addMember("mappedBy", "$S", mappedByNameOnChild)
+                            .addMember("fetch", "$T.LAZY", ClassName.get("jakarta.persistence", "FetchType"))
+                            .build();
+
+                    FieldSpec.Builder f = FieldSpec.builder(setOfChild, fieldName, Modifier.PRIVATE)
+                            .addAnnotation(oneToManyBack);
+                    fields.add(f.build());
+                }
+            }
+        }
+
+        return fields;
+    }
+
+    /**
+     * Generates the <EntityName>Id embeddable class for composite primary keys.
+     */
+    private void writeEmbeddedId(String entityPackage,
                                  Path rootPath,
                                  String idClassName,
                                  EntityModel model,
@@ -396,6 +687,7 @@ public class GenerationService {
             ColumnModel col = model.columns().get(pkCol);
 
             String fieldName = namingConfigService.resolveColumnName(model.table(), pkCol);
+
             TypeName javaType = SqlTypeMapper.map(
                     col.dataType(),
                     col.typeName(),
@@ -403,16 +695,10 @@ public class GenerationService {
                     dbProduct
             );
 
-            AnnotationSpec.Builder columnAnn = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "Column"))
-                    .addMember("name", "$S", pkCol);
-
-            String tn = col.typeName() == null ? "" : col.typeName().toLowerCase();
-            if ((tn.equals("jsonb") || tn.equals("json")) && isPostgres(dbProduct)) {
-                columnAnn.addMember("columnDefinition", "$S", tn);
-            }
-
             FieldSpec f = FieldSpec.builder(javaType, fieldName, Modifier.PRIVATE)
-                    .addAnnotation(columnAnn.build())
+                    .addAnnotation(AnnotationSpec.builder(ClassName.get("jakarta.persistence", "Column"))
+                            .addMember("name", "$S", pkCol)
+                            .build())
                     .addAnnotation(ClassName.get("lombok", "ToString").nestedClass("Include"))
                     .addAnnotation(ClassName.get("lombok", "EqualsAndHashCode").nestedClass("Include"))
                     .build();
@@ -420,14 +706,13 @@ public class GenerationService {
             emb.addField(f);
         }
 
-        JavaFile.builder(basePackage, emb.build())
+        JavaFile.builder(entityPackage, emb.build())
                 .build()
                 .writeTo(rootPath);
     }
 
     /**
-     * Detects whether the column is auto-generated (identity/sequence/auto_increment/...).
-     * Logic is database-product specific and uses column metadata and default definitions.
+     * Detects auto-generated identity behavior for the given column.
      */
     private boolean detectAutoIncrement(String dbProduct,
                                         String isAuto,
@@ -447,8 +732,8 @@ public class GenerationService {
     }
 
     /**
-     * Checks if the given column participates in a UNIQUE index.
-     * If true, a single-column FK referencing a parent entity can be modeled as @OneToOne.
+     * Verifies if a column participates in a UNIQUE index.
+     * Used to distinguish @OneToOne vs @ManyToOne.
      */
     private boolean isColumnUnique(DatabaseMetaData md,
                                    String catalog,
@@ -483,6 +768,20 @@ public class GenerationService {
         return dbProduct != null && dbProduct.toLowerCase().contains("postgres");
     }
 
+    /**
+     * Returns a unique field name. If already taken, appends numeric suffixes.
+     */
+    private String uniquify(String candidate, Set<String> used) {
+        String base = candidate;
+        int idx = 2;
+        while (used.contains(candidate)) {
+            candidate = base + idx;
+            idx++;
+        }
+        used.add(candidate);
+        return candidate;
+    }
+
     private static String nullSafe(String s) {
         return s == null ? "" : s;
     }
@@ -508,23 +807,45 @@ public class GenerationService {
         return p;
     }
 
+    /**
+     * Builds a sibling-level package name.
+     * Example:
+     *   entityPackage = "org.cheetah.entities"
+     *   siblingPackage(entityPackage, "dtos") -> "org.cheetah.dtos"
+     *   siblingPackage(entityPackage, "mappers") -> "org.cheetah.mappers"
+     *
+     * If there is no dot in the base package, fallback is just the sibling name.
+     */
+    private static String siblingPackage(String entityPackage, String name) {
+        if (entityPackage == null || entityPackage.isBlank()) {
+            return name;
+        }
+        int idx = entityPackage.lastIndexOf('.');
+        if (idx <= 0) {
+            return name;
+        }
+        String parent = entityPackage.substring(0, idx);
+        return parent + "." + name;
+    }
+
     private static String lowerFirst(String s) {
         if (s == null || s.isBlank()) return s;
         return s.substring(0, 1).toLowerCase(Locale.ROOT) + s.substring(1);
     }
 
-    /**
-     * In-memory model of a database table.
+    /*
+     * Internal metadata view of a table.
      */
-    record EntityModel(String schema,
+    record EntityModel(String catalog,
+                       String schema,
                        String table,
                        Map<String, ColumnModel> columns,
                        Set<String> pkCols,
                        List<SimpleFkModel> simpleFks) {
     }
 
-    /**
-     * In-memory model of a table column.
+    /*
+     * Internal view of a column.
      */
     record ColumnModel(String name,
                        int dataType,
@@ -534,15 +855,15 @@ public class GenerationService {
                        boolean autoIncrement) {
     }
 
-    /**
-     * In-memory model of a single-column foreign key.
+    /*
+     * Single-column FK model.
      */
     record SimpleFkModel(String localColumn,
                          String targetTable,
                          String targetColumn) {
     }
 
-    /**
+    /*
      * Raw row from DatabaseMetaData.getImportedKeys().
      */
     record ImportedFkRow(String fkName,

@@ -1,47 +1,65 @@
 # 🗡️ S.W.O.R.D. — Schema-Wide Object Reverse Designer
 
-**S.W.O.R.D.** is a standalone Java tool for reverse-engineering relational databases into fully annotated **JPA entities** with **Lombok** support.
+**S.W.O.R.D.** (Schema‑Wide Object Reverse Designer) is a standalone Java tool for reverse‑engineering relational databases into annotated **JPA entities** using **Lombok**.
 
-The tool connects to an existing relational schema, reads metadata (tables, columns, constraints, keys, etc.), and generates clean, consistent entity classes in Java.
+The tool connects to a relational database, reads schema metadata (tables, columns, keys, constraints), and generates consistent, clean entity classes.
 
 ---
 
 ## 🧩 Acronym Meaning
 
-**S.W.O.R.D.** = **Schema-Wide Object Reverse Designer**  
+**S.W.O.R.D.** = **Schema‑Wide Object Reverse Designer**  
 Because it cuts through complex schemas and forges structured JPA entities from raw database metadata.
 
 ---
 
 ## 🚀 Features
 
-- Reverse-engineers entire relational schemas into annotated JPA entities.
-- Generates Lombok annotations (`@Data`, `@Builder`, etc.) for clean, boilerplate-free code.
+- Reverse‑engineers entire relational schemas into annotated JPA entities.
+- Uses Lombok (`@Data`, `@Builder`, `@AllArgsConstructor`, `@NoArgsConstructor`) for concise code.
 - Handles:
   - `@EmbeddedId` for composite primary keys.
-  - `@GeneratedValue` for identity, serial, and sequence columns.
-  - Optional `@OneToOne` / `@ManyToOne` relationships.
+  - `@GeneratedValue` for identity, serial, or sequence columns.
+  - `@OneToOne`, `@ManyToOne`, `@OneToMany`, `@ManyToMany` relationships.
   - `json` / `jsonb` columns → `Map<String,Object>`.
-- Supports PostgreSQL, MariaDB, MySQL, SQL Server, H2, and IBM DB2.
-- Allows custom naming configuration through a YAML file.
-- Fully interactive console wizard for setup and generation.
+- Supports both **scalar foreign keys** (default) and **entity relationships** (optional).
+- Allows choosing **relation fetch mode** (`LAZY` or `EAGER`).
+- Fully interactive console wizard.
+- Customizable naming rules via YAML file.
 
 ---
 
 ## 🏗️ Generation Flow
 
-When you start S.W.O.R.D., the wizard runs interactively:
+When S.W.O.R.D. starts, it launches an interactive wizard:
 
-1. Choose the JDBC driver.
-2. Provide connection details (host, port, username, password, database).
-3. Select the schema or catalog.
-4. Choose:
-   - Base package (e.g., `com.example.entities`)
-   - Output path (default: current working directory)
-5. Choose FK mode:
-   - SCALAR → generates `Long companyId`
-   - RELATION → generates `Company company`
-6. Generation begins.
+1. Select database type (PostgreSQL, MariaDB, MySQL, SQL Server, H2, DB2).
+2. Enter host, port, username, password, and database name.
+3. Choose schema and/or catalog.
+4. Provide base package (e.g. `org.cheetah.entities`) and output path (default = current directory).
+5. Choose foreign key mode:
+   - `SCALAR` → generates `Long companyId`
+   - `RELATION` → generates `Company company`
+6. Choose relation fetch mode (for `@ManyToOne` / `@OneToOne`):
+   - `LAZY` (default, recommended)
+   - `EAGER`
+7. Entity generation starts automatically.
+
+---
+
+## ⚙️ Relation Fetch Mode
+
+The **Relation Fetch Mode** controls how JPA loads related entities:
+
+```
+[1] LAZY   → fetch on demand (recommended, prevents session overhead)
+[2] EAGER  → always load joined entity immediately
+```
+
+Only affects `@ManyToOne` and `@OneToOne` relations.  
+`@OneToMany` and `@ManyToMany` are always generated as `LAZY`.
+
+This setting can be changed interactively during generation.
 
 ---
 
@@ -65,20 +83,9 @@ PBSCode -> pBSCode
 
 ## ⚙️ Optional YAML Naming Overrides
 
-You can override generated names using a YAML configuration file.  
-Pass the file path when starting the JAR:
+You can override table and column names using a YAML configuration file.
 
-```
-java -jar target/sword-0.1.0-SNAPSHOT.jar --naming-file=/path/to/naming-overrides.yml
-```
-or
-```
-java -jar target/sword-0.1.0-SNAPSHOT.jar --namingFile=/path/to/naming-overrides.yml
-```
-
-If omitted, default naming rules are applied.
-
-### Example `naming-overrides.yml`
+### Example
 
 ```yaml
 tables:
@@ -99,18 +106,26 @@ tables:
       event_timestamp: timestamp
 ```
 
-All unmapped tables and columns follow the default naming logic.
+Pass the file path via CLI argument:
+
+```bash
+java -jar target/sword-0.1.0-SNAPSHOT.jar --namingFile=/path/to/naming-overrides.yml
+```
+
+If omitted, S.W.O.R.D. uses automatic naming based on the database schema.
 
 ---
 
 ## 🧩 Supported Databases
 
-PostgreSQL (port 5432)  
-MariaDB (port 3306)  
-MySQL (port 3306)  
-SQL Server (port 1433)  
-H2 (port 9092)  
-IBM DB2 (port 50000)
+| Vendor | Default Port |
+|--------|---------------|
+| PostgreSQL | 5432 |
+| MariaDB | 3306 |
+| MySQL | 3306 |
+| SQL Server | 1433 |
+| H2 | 9092 |
+| IBM DB2 | 50000 |
 
 ---
 
@@ -144,16 +159,28 @@ public class Incident {
 
 ---
 
-## 📦 Output Example
+## 🧾 Example Output Structure
 
 ```
 /Users/edoardo/Documents/workspaces/sword-output/
-└── com/example/entities/
+└── org/cheetah/entities/
     ├── Problem.java
     ├── Incident.java
     ├── AlarmEvent.java
     └── IncidentId.java
 ```
+
+---
+
+## 🧩 FK and Relation Configuration
+
+- **FK Mode**  
+  `SCALAR` = only FK field (Long, Integer, etc.)  
+  `RELATION` = full relation field (`@ManyToOne`, `@OneToOne`, etc.)
+
+- **Relation Fetch Mode**  
+  `LAZY` = recommended (on-demand load)  
+  `EAGER` = full join load
 
 ---
 

@@ -7,14 +7,15 @@ import org.yaml.snakeyaml.Yaml;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 
 /**
- * Provides resolution of entity simple names and field names based on:
- * 1. Optional YAML overrides.
- * 2. Default naming rules (camelCase for columns, PascalCase for entities).
+ * Provides resolution of Java entity class names (for tables) and Java field names (for columns).
+ *
+ * Precedence:
+ * 1. If a YAML override is provided at runtime with --naming-file=... or --namingFile=...,
+ *    those overrides are applied first.
+ * 2. Otherwise, names are derived automatically.
  *
  * YAML structure example:
  *
@@ -29,21 +30,23 @@ import java.util.Map;
  *     columns:
  *       incident_id: id
  *       INCIDENT_SEVERITY: severityLevel
+ *   alarm_events:
+ *     entityName: AlarmEvent
+ *     columns:
+ *       event_code: code
+ *       event_timestamp: timestamp
  *
- * The YAML file path is provided at runtime with a command-line argument:
- *
- *   --naming-file=/path/to/file.yml
- *   or
- *   --namingFile=/path/to/file.yml
- *
- * If no argument is provided, no overrides are applied.
+ * Behavior:
+ * - Tables not listed in YAML still get generated using default naming rules.
+ * - Columns not listed in YAML still get generated using default naming rules.
  */
 @Service
 public class NamingConfigService {
 
     /**
-     * Holds table-level overrides (entity simple name + per-column overrides).
-     * Key is the physical table name in lowercase, as seen in the DB metadata.
+     * Holds table-level overrides from YAML.
+     * Key: physical table name (lowercased).
+     * Value: override for entity simple name and per-column mappings.
      */
     private final Map<String, TableOverride> tableOverrides = new HashMap<>();
 
@@ -56,25 +59,52 @@ public class NamingConfigService {
         if (overridePath != null) {
             loadOverrides(overridePath);
         } else {
-            System.out.println("No naming override file provided (use --naming-file=...).");
+            System.out.println("No naming override file provided (use --naming-file=... or --namingFile=...).");
         }
     }
 
     /**
-     * Resolves the YAML override path from application arguments.
+     * Returns the entity simple class name for a given physical table name.
+     * Precedence:
+     * 1. YAML override (tables.<table>.entityName)
+     * 2. Default derivation from the table name
+     */
+    public String resolveEntityName(String tableName) {
+        TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
+        if (override != null && override.entityName() != null && !override.entityName().isBlank()) {
+            return override.entityName();
+        }
+        return deriveEntityName(tableName);
+    }
+
+    /**
+     * Returns the Java field/property name for a given physical column name.
+     * Precedence:
+     * 1. YAML override (tables.<table>.columns.<column>)
+     * 2. Default camelCase derivation
+     */
+    public String resolveColumnName(String tableName, String columnName) {
+        TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
+        if (override != null && override.columns().containsKey(columnName)) {
+            return override.columns().get(columnName);
+        }
+        return toPropertyName(columnName);
+    }
+
+    /**
+     * Resolves CLI argument for the naming override YAML file.
      * Supports both --naming-file=... and --namingFile=...
-     * Returns null if not provided or empty.
      */
     private Path resolveOverridePath(ApplicationArguments args) {
         String pathCandidate = null;
 
         if (args.containsOption("naming-file")) {
-            var values = args.getOptionValues("naming-file");
+            List<String> values = args.getOptionValues("naming-file");
             if (values != null && !values.isEmpty()) {
                 pathCandidate = values.get(0);
             }
         } else if (args.containsOption("namingFile")) {
-            var values = args.getOptionValues("namingFile");
+            List<String> values = args.getOptionValues("namingFile");
             if (values != null && !values.isEmpty()) {
                 pathCandidate = values.get(0);
             }
@@ -88,9 +118,8 @@ public class NamingConfigService {
     }
 
     /**
-     * Loads the table and column overrides from the provided YAML file.
-     * The file is optional. If it does not exist or cannot be parsed,
-     * only default naming rules will be used.
+     * Loads table/column overrides from a YAML file.
+     * Safe to call even if file does not exist or is malformed (will fallback to defaults).
      */
     @SuppressWarnings("unchecked")
     private void loadOverrides(Path path) {
@@ -141,102 +170,262 @@ public class NamingConfigService {
     }
 
     /**
-     * Returns the entity simple class name for the given physical table name.
-     * Priority:
-     * 1. YAML override (tables.<table>.entityName)
-     * 2. Default derivation (camelCase + capitalize first letter)
+     * Derives an entity simple name from a physical table name.
      *
-     * Example:
-     *   table "incidents_log" -> "IncidentsLog"
-     *   override entityName: "IncidentLog"
-     */
-    public String resolveEntityName(String tableName) {
-        TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
-        if (override != null && override.entityName() != null && !override.entityName().isBlank()) {
-            return override.entityName();
-        }
-        return deriveEntityName(tableName);
-    }
-
-    /**
-     * Returns the Java field/property name for a given physical column name.
-     * Priority:
-     * 1. YAML override (tables.<table>.columns.<column>)
-     * 2. Default camelCase derivation
-     *
-     * Example:
-     *   column "INCIDENT_SEVERITY" -> "incidentSeverity"
-     *   column "problem_id"       -> "problemId"
-     *   override columns.problem_id: "id"
-     */
-    public String resolveColumnName(String tableName, String columnName) {
-        TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
-        if (override != null && override.columns().containsKey(columnName)) {
-            return override.columns().get(columnName);
-        }
-        return toCamelCase(columnName);
-    }
-
-    /**
-     * Converts a column identifier to lowerCamelCase.
      * Rules:
-     * - Underscore ("_") splits words and triggers capitalization of next character.
-     * - Characters after underscores are preserved in uppercase for that first letter.
-     * - All non-underscore characters are lowercased unless promoted by the previous rule.
+     * 1. Split table name into tokens.
+     *    - If it contains '_' or '-' or other non-alphanumeric separators, split on these.
+     *    - Else, attempt camelCase split (CustomerOrders -> ["Customer", "Orders"]).
+     *    - Else, fall back to the full table name as a single token.
+     *
+     * 2. Singularize each token ("users" -> "user", "companies" -> "company", "subcategories" -> "subcategory").
+     *
+     * 3. Capitalize each singular token (user -> User, subcategory -> Subcategory).
+     *
+     * 4. Concatenate all tokens.
      *
      * Examples:
-     *   "alarm_type_id"   -> "alarmTypeId"
-     *   "ASSET_CODE"      -> "assetCode"
-     *   "PBSCode"         -> "pBSCode"
-     *   "INCIDENT_SEVERITY" -> "incidentSeverity"
+     *   "users"                     -> "User"
+     *   "incidents_history"         -> "IncidentHistory"
+     *   "intervention_subcategories"-> "InterventionSubcategory"
+     *   "PBS_CODE"                  -> "PbsCode"
+     *   "CUSTOMER_ORDERS"           -> "CustomerOrder"
+     *   "IncidentsMaintenance"      -> "IncidentMaintenance"
      *
-     * Note: internal uppercase sequences in the original name are generally collapsed
-     * to standard camelCase, except the first promoted letter after an underscore.
-     */
-    private String toCamelCase(String raw) {
-        if (raw == null || raw.isEmpty()) return raw;
-
-        StringBuilder sb = new StringBuilder();
-        boolean upperNext = false;
-
-        for (char c : raw.toCharArray()) {
-            if (c == '_') {
-                upperNext = true;
-                continue;
-            }
-            if (upperNext) {
-                sb.append(Character.toUpperCase(c));
-                upperNext = false;
-            } else {
-                sb.append(Character.toLowerCase(c));
-            }
-        }
-
-        String result = sb.toString();
-        if (!result.isEmpty()) {
-            result = Character.toLowerCase(result.charAt(0)) + result.substring(1);
-        }
-        return result;
-    }
-
-    /**
-     * Derives an entity class name from a table name using camelCase + leading capital.
-     * Example:
-     *   "incidents_log" -> "IncidentsLog"
-     *   "FRACAS_EVENT"  -> "FracasEvent"
+     * Limitation:
+     *   If the table name is a single all-lowercase word with no separators
+     *   and is not clearly plural (e.g. "incidentsmaintenance"), word
+     *   boundaries cannot be inferred, so the result may remain unsplit
+     *   (e.g. "Incidentsmaintenance").
      */
     private String deriveEntityName(String tableName) {
-        String camel = toCamelCase(tableName);
-        if (camel == null || camel.isEmpty()) {
+        if (tableName == null || tableName.isBlank()) {
             return tableName;
         }
-        return Character.toUpperCase(camel.charAt(0)) + camel.substring(1);
+
+        List<String> tokens = splitIntoTokens(tableName);
+
+        List<String> singularTokens = new ArrayList<>();
+        for (String t : tokens) {
+            String singular = singularize(t);
+            singularTokens.add(capitalize(singular.toLowerCase(Locale.ROOT)));
+        }
+
+        if (singularTokens.isEmpty()) {
+            return capitalize(tableName.toLowerCase(Locale.ROOT));
+        }
+
+        return String.join("", singularTokens);
     }
 
     /**
-     * In-memory representation of overrides for a single table.
-     * entityName: desired entity simple name for the table (optional).
-     * columns: map from physical column name -> desired Java field name.
+     * Returns the Java field/property name for a column name if not overridden.
+     *
+     * Behavior depends on the structure:
+     *
+     * Case A: snake_case / SCREAMING_SNAKE_CASE
+     *   "problem_id"         -> "problemId"
+     *   "ASSET_CODE"         -> "assetCode"
+     *   "INCIDENT_SEVERITY"  -> "incidentSeverity"
+     *
+     * Case B: already camel-like or contains internal capitals
+     *   "PBSCode"            -> "pBSCode"
+     *
+     * Logic:
+     * - If the column contains "_" → split on "_" and build standard lowerCamelCase.
+     * - Otherwise → keep original capitalization, only force the very first letter to lowercase.
+     */
+    private String toPropertyName(String columnName) {
+        if (columnName == null || columnName.isBlank()) {
+            return columnName;
+        }
+
+        if (columnName.contains("_")) {
+            String[] parts = columnName.split("_+");
+            if (parts.length == 0) {
+                return columnName;
+            }
+
+            StringBuilder sb = new StringBuilder();
+
+            // first chunk -> lowercase full chunk
+            sb.append(parts[0].toLowerCase(Locale.ROOT));
+
+            // following chunks -> capitalize first char, lowercase the rest
+            for (int i = 1; i < parts.length; i++) {
+                String p = parts[i].toLowerCase(Locale.ROOT);
+                sb.append(capitalize(p));
+            }
+
+            return sb.toString();
+        }
+
+        // no underscore: keep internal capitalization, only lowercase the first character
+        if (columnName.length() == 1) {
+            return columnName.toLowerCase(Locale.ROOT);
+        }
+        return columnName.substring(0, 1).toLowerCase(Locale.ROOT) + columnName.substring(1);
+    }
+
+    /**
+     * Splits a table name into "words".
+     *
+     * Strategy:
+     * 1. If there are non-alphanumeric separators (underscore, dash, etc.), split on those.
+     * 2. Else split on camel-case boundaries (e.g. "CustomerOrders" -> ["Customer", "Orders"]).
+     * 3. Fallback: one single token [name].
+     */
+    private List<String> splitIntoTokens(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        // Case 1: split on non-alphanumeric (underscore, dash, etc.)
+        if (raw.matches(".*[^A-Za-z0-9].*")) {
+            String[] parts = raw.split("[^A-Za-z0-9]+");
+            List<String> out = new ArrayList<>();
+            for (String p : parts) {
+                if (!p.isBlank()) {
+                    out.add(p);
+                }
+            }
+            return out;
+        }
+
+        // Case 2: try camelCase / PascalCase split
+        List<String> camelParts = splitCamelCase(raw);
+        if (!camelParts.isEmpty()) {
+            return camelParts;
+        }
+
+        // Case 3: fallback to raw as single token
+        return Collections.singletonList(raw);
+    }
+
+    /**
+     * Splits a string on camelCase / PascalCase boundaries.
+     * Example:
+     *   "IncidentsMaintenance" -> ["Incidents","Maintenance"]
+     *   "CUSTOMEROrders"       -> ["CUSTOMER","Orders"]
+     *
+     * Implementation:
+     *  - boundary at transition [a-z][A-Z]
+     *  - boundary at transition [0-9][A-Za-z]
+     *  - boundary at transition [A-Z][A-Z][a-z] (e.g. "PBSCode" -> ["PBS","Code"])
+     */
+    private List<String> splitCamelCase(String s) {
+        List<String> parts = new ArrayList<>();
+        if (s == null || s.isBlank()) return parts;
+
+        StringBuilder current = new StringBuilder();
+        char[] arr = s.toCharArray();
+
+        for (int i = 0; i < arr.length; i++) {
+            char c = arr[i];
+
+            if (current.length() == 0) {
+                current.append(c);
+                continue;
+            }
+
+            char prev = arr[i - 1];
+
+            boolean boundary = false;
+
+            // lower -> upper (e.g. tM)
+            if (Character.isLowerCase(prev) && Character.isUpperCase(c)) {
+                boundary = true;
+            }
+
+            // digit -> letter
+            if (Character.isDigit(prev) && Character.isLetter(c)) {
+                boundary = true;
+            }
+
+            // UPPER followed by UPPER then lower (e.g. "PBSc" -> split before 'c')
+            if (i < arr.length - 1) {
+                char next = arr[i + 1];
+                if (Character.isUpperCase(prev) && Character.isUpperCase(c) && Character.isLowerCase(next)) {
+                    boundary = true;
+                }
+            }
+
+            if (boundary) {
+                parts.add(current.toString());
+                current.setLength(0);
+            }
+            current.append(c);
+        }
+
+        if (current.length() > 0) {
+            parts.add(current.toString());
+        }
+
+        return parts;
+    }
+
+    /**
+     * Applies a naive plural -> singular heuristic for English-like plurals.
+     *
+     * Rules:
+     * - "companies"   -> "company"
+     * - "batches"     -> "batch"
+     * - "classes"     -> "class"
+     * - "boxes"       -> "box"
+     * - "incidents"   -> "incident"
+     * - "orders"      -> "order"
+     *
+     * If none of the patterns match, returns the original token.
+     */
+    private String singularize(String token) {
+        if (token == null || token.isBlank()) {
+            return token;
+        }
+
+        String w = token;
+        String lw = w.toLowerCase(Locale.ROOT);
+
+        // companies -> company
+        if (lw.endsWith("ies") && w.length() > 3) {
+            return w.substring(0, w.length() - 3) + "y";
+        }
+
+        // batches -> batch, classes -> class, boxes -> box, crashes -> crash
+        if ((lw.endsWith("ses")
+                || lw.endsWith("xes")
+                || lw.endsWith("zes")
+                || lw.endsWith("ches")
+                || lw.endsWith("shes"))
+                && w.length() > 3) {
+            return w.substring(0, w.length() - 2);
+        }
+
+        // generic plural: orders -> order, incidents -> incident
+        if (lw.endsWith("s") && w.length() > 1) {
+            return w.substring(0, w.length() - 1);
+        }
+
+        return w;
+    }
+
+    /**
+     * Capitalizes the first character and lowercases the rest.
+     * Example: "subcategories" -> "Subcategories", "CODE" -> "Code"
+     */
+    private String capitalize(String s) {
+        if (s == null || s.isBlank()) {
+            return s;
+        }
+        if (s.length() == 1) {
+            return s.toUpperCase(Locale.ROOT);
+        }
+        return s.substring(0, 1).toUpperCase(Locale.ROOT) + s.substring(1);
+    }
+
+    /**
+     * Holds naming overrides for a single table.
+     * entityName: desired entity class simple name
+     * columns: map: physical column name -> desired Java field name
      */
     record TableOverride(String entityName, Map<String, String> columns) {}
 }
