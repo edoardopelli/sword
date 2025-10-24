@@ -26,26 +26,42 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * S.W.O.R.D. - GenerationService (Scalar-FK only) + @GeneratedValue on identity/serial/sequence PK
+ * S.W.O.R.D. - GenerationService
  *
- * Scrive i file sotto l'outputPath scelto dall'utente.
- * Esempio:
- *   outputPath = "."
- *   basePackage = "org.cheetah.entities"
+ * - Generates JPA @Entity classes (only scalar FK fields, no relationships)
+ * - Generates @Embeddable Id classes for composite PKs
+ * - Adds Lombok annotations:
+ *      @Data, @NoArgsConstructor, @AllArgsConstructor, @Builder,
+ *      @ToString(onlyExplicitlyIncluded = true),
+ *      @EqualsAndHashCode(onlyExplicitlyIncluded = true)
+ * - Adds @Generated("S.W.O.R.D.")
+ * - Adds @GeneratedValue on simple PKs when detected as identity/serial/sequence
+ * - Maps Postgres json/jsonb to Map<String,Object> with @JdbcTypeCode(SqlTypes.JSON)
  *
- * Risultato:
- *   ./org/cheetah/entities/<Entity>.java
+ * NAMING:
+ *  - Class name is singular CamelCase from table name ("user_profiles" -> "UserProfile")
+ *  - You can override via sword.yml (see README)
  *
- * NIENTE più doppia cartella.
+ * OUTPUT:
+ *  - Writes under the chosen outputPath
+ *  - JavaPoet will create subfolders following the base package
+ *    e.g. outputPath="." and basePackage="org.cheetah.entities"
+ *         -> ./org/cheetah/entities/<Entity>.java
  */
 @Service
 public class GenerationService {
 
     private final MetadataService metadataService;
+    private final NamingConfigService namingConfigService;
     private final ApplicationEventPublisher publisher;
 
-    public GenerationService(MetadataService metadataService, ApplicationEventPublisher publisher) {
+    public GenerationService(
+            MetadataService metadataService,
+            NamingConfigService namingConfigService,
+            ApplicationEventPublisher publisher
+    ) {
         this.metadataService = metadataService;
+        this.namingConfigService = namingConfigService;
         this.publisher = publisher;
     }
 
@@ -65,10 +81,11 @@ public class GenerationService {
             List<String> tables = metadataService.listTables(c, catalog, schema);
             System.out.printf("   Found %d table(s).%n", tables.size());
 
-            // normalizza sempre il package in forma dotted (org.cheetah...)
+            // normalize the package (org.cheetah.entities)
             String normalizedBasePackage = normalizePackage(cfg.getBasePackage());
 
-            // root di output: SOLO quella scelta dall'utente
+            // output root (do NOT append package path here,
+            // JavaPoet will do it for us when we call writeTo)
             Path rootPath = cfg.getOutputPath();
             Files.createDirectories(rootPath);
             System.out.printf("   Output root folder: %s%n", rootPath.toAbsolutePath());
@@ -156,18 +173,21 @@ public class GenerationService {
        ========================= */
 
     private void writeEntityFiles(String basePackage, Path rootPath, EntityModel model, String dbProduct) throws IOException {
-        String className = NamingUtils.toClassName(model.table());
+        // 1. calcolo il nome della classe
+        String entitySimpleName = namingConfigService.resolveEntityName(model.table());
         String packageName = basePackage;
 
         boolean compositePk = model.pkCols().size() > 1;
-        String idClassName = className + "Id";
+        String idClassName = entitySimpleName + "Id";
 
+        // @Generated("S.W.O.R.D.") with timestamp
         String nowIso = java.time.OffsetDateTime.now().toString();
         AnnotationSpec generatedAnn = AnnotationSpec.builder(ClassName.get("jakarta.annotation", "Generated"))
                 .addMember("value", "$S", "S.W.O.R.D.")
                 .addMember("date", "$S", nowIso)
                 .build();
 
+        // Lombok customization for toString/equals
         AnnotationSpec toStringAnn = AnnotationSpec.builder(ClassName.get("lombok", "ToString"))
                 .addMember("onlyExplicitlyIncluded", "$L", true)
                 .build();
@@ -175,7 +195,8 @@ public class GenerationService {
                 .addMember("onlyExplicitlyIncluded", "$L", true)
                 .build();
 
-        TypeSpec.Builder entity = TypeSpec.classBuilder(className)
+        // 2. costruiamo la classe entity
+        TypeSpec.Builder entity = TypeSpec.classBuilder(entitySimpleName)
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(ClassName.get("jakarta.persistence", "Entity"))
                 .addAnnotation(AnnotationSpec.builder(ClassName.get("jakarta.persistence", "Table"))
@@ -189,6 +210,7 @@ public class GenerationService {
                 .addAnnotation(eqHashAnn)
                 .addAnnotation(generatedAnn);
 
+        // 3. composite PK
         if (compositePk) {
             ClassName idClass = ClassName.get(packageName, idClassName);
             FieldSpec.Builder idField = FieldSpec.builder(idClass, "id", Modifier.PRIVATE)
@@ -198,9 +220,10 @@ public class GenerationService {
             entity.addField(idField.build());
 
             writeEmbeddedId(packageName, rootPath, idClassName, model, dbProduct, generatedAnn);
-            System.out.printf("   [+] %sId.java%n", idClassName);
+            System.out.printf("   [+] %sId.java%n", entitySimpleName);
         }
 
+        // 4. campi
         for (ColumnModel col : model.columns().values()) {
             if (compositePk && model.pkCols().contains(col.name())) continue;
 
@@ -209,12 +232,14 @@ public class GenerationService {
 
             FieldSpec.Builder field = FieldSpec.builder(javaType, fieldName, Modifier.PRIVATE);
 
+            // simple PK
             if (!compositePk && model.pkCols().contains(col.name())) {
                 field.addAnnotation(ClassName.get("jakarta.persistence", "Id"));
                 field.addAnnotation(ClassName.get("lombok", "EqualsAndHashCode").nestedClass("Include"));
                 field.addAnnotation(ClassName.get("lombok", "ToString").nestedClass("Include"));
 
                 if (col.autoIncrement()) {
+                    // Postgres sequence-aware
                     if (isPostgres(dbProduct) && col.columnDef() != null && col.columnDef().toLowerCase().contains("nextval(")) {
                         String seqName = extractPgSequenceName(col.columnDef());
                         String genName = (model.table() + "_" + col.name() + "_seq_gen").replaceAll("[^A-Za-z0-9_]", "_");
@@ -246,6 +271,7 @@ public class GenerationService {
                     }
                 }
             } else {
+                // scalar FK etc, include in toString unless it's byte[]
                 if (!javaType.toString().equals("byte[]")) {
                     field.addAnnotation(ClassName.get("lombok", "ToString").nestedClass("Include"));
                 }
@@ -268,11 +294,12 @@ public class GenerationService {
             entity.addField(field.build());
         }
 
+        // 5. scrivi l'entity
         JavaFile.builder(packageName, entity.build())
                 .build()
                 .writeTo(rootPath);
 
-        System.out.printf("   [+] %s.java%n", className);
+        System.out.printf("   [+] %s.java%n", entitySimpleName);
     }
 
     private void writeEmbeddedId(

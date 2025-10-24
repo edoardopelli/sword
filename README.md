@@ -104,6 +104,38 @@ You’ll be guided through an **interactive setup**:
    Generation complete. 42 entities created.
    ```
 
+
+## Entity naming
+
+By default, S.W.O.R.D. generates one JPA entity per physical table.
+
+### Default naming strategy
+
+For each table name, S.W.O.R.D. creates a Java class name by:
+1. Splitting the table name on underscores / non-alphanumeric characters.
+2. Singularizing each chunk in a simple English-ish way (e.g. `users` → `user`, `profiles` → `profile`, `companies` → `company`, `batches` → `batch`).
+3. Capitalizing and concatenating the chunks.
+
+
+The same naming rule is also used to build the `<EntityName>Id` class for composite primary keys.  
+So a table called `user_profiles` will generate:
+- `UserProfile.java`
+- `UserProfileId.java` (if the PK is composite)
+
+
+### Overriding names with `sword.yml`
+
+You can override the generated class names on a per-table basis without touching code.
+
+Create a file called `sword.yml` **in the same working directory where you run `java -jar sword-...jar`**.
+
+Example `sword.yml`:
+
+```yaml
+tables:
+  fracas_events: Event
+  app_users: AccountUser
+  company_branches: Branch
 ---
 
 ## 🏗️ Output Example
