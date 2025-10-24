@@ -37,6 +37,7 @@ import java.util.List;
  *    - FK mode (SCALAR vs RELATION)
  *    - relation fetch mode (LAZY vs EAGER) ONLY IF fkMode == RELATION
  *    - DTO/mapping generation (yes/no)
+ *    - Repository generation (yes/no)
  * 6. Emit GenerateRequestedEvent to start entity generation.
  *
  * Uses JLine for terminal IO.
@@ -209,18 +210,27 @@ public class SwordWizard {
             boolean generateDto = dtoChoice.equalsIgnoreCase("y") || dtoChoice.equalsIgnoreCase("yes");
             cfg.setGenerateDto(generateDto);
 
+            // Repository generation (NEW)
+            println(terminal, "\nRepository generation:");
+            println(terminal, "  [y] Generate Spring Data repositories");
+            println(terminal, "  [n] Do not generate repositories (default)");
+            String repoChoice = readDefault(reader, "Generate repositories? [y/N]", "n");
+            boolean generateRepositories = repoChoice.equalsIgnoreCase("y") || repoChoice.equalsIgnoreCase("yes");
+            cfg.setGenerateRepositories(generateRepositories);
+
             // Summary
             println(terminal, "\nGeneration plan:");
-            println(terminal, "  DB Vendor       : " + db.displayName());
-            println(terminal, "  Host            : " + cfg.getHost() + ":" + cfg.getPort());
-            println(terminal, "  Database        : " + cfg.getDbName());
-            println(terminal, "  Catalog         : " + cfg.getCatalog());
-            println(terminal, "  Schema          : " + cfg.getSchema());
-            println(terminal, "  Base package    : " + cfg.getBasePackage());
-            println(terminal, "  Output path     : " + cfg.getOutputPath());
-            println(terminal, "  FK mode         : " + cfg.getFkMode());
-            println(terminal, "  Relation fetch  : " + cfg.getRelationFetch());
-            println(terminal, "  Generate DTO    : " + cfg.getGenerateDto());
+            println(terminal, "  DB Vendor         : " + db.displayName());
+            println(terminal, "  Host              : " + cfg.getHost() + ":" + cfg.getPort());
+            println(terminal, "  Database          : " + cfg.getDbName());
+            println(terminal, "  Catalog           : " + cfg.getCatalog());
+            println(terminal, "  Schema            : " + cfg.getSchema());
+            println(terminal, "  Base package      : " + cfg.getBasePackage());
+            println(terminal, "  Output path       : " + cfg.getOutputPath());
+            println(terminal, "  FK mode           : " + cfg.getFkMode());
+            println(terminal, "  Relation fetch    : " + cfg.getRelationFetch());
+            println(terminal, "  Generate DTO      : " + cfg.getGenerateDto());
+            println(terminal, "  Generate Repo     : " + cfg.getGenerateRepositories());
 
             // Fire events
             publisher.publishEvent(new SchemaChosenEvent(cfg, selection));
