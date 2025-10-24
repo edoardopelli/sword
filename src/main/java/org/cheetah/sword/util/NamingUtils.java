@@ -4,16 +4,14 @@ import java.util.Locale;
 
 public final class NamingUtils {
 
-    private NamingUtils() {
-    }
+    private NamingUtils() {}
 
     /**
-     * Convert a SQL column name (snake_case, kebab-case, etc.) into a Java field
-     * name in lowerCamelCase, WITHOUT trying to singularize.
+     * Convert a SQL column name (snake_case etc.) into a Java field name lowerCamelCase.
      *
-     *  "user_id"   -> "userId"
-     *  "CREATED_AT"-> "createdAt"
-     *  "zip-code"  -> "zipCode"
+     * "user_id"      -> "userId"
+     * "CREATED_AT"   -> "createdAt"
+     * "zip-code"     -> "zipCode"
      */
     public static String toFieldName(String columnName) {
         if (columnName == null || columnName.isBlank()) {
@@ -34,65 +32,72 @@ public final class NamingUtils {
     }
 
     /**
-     * Build the default Java entity class name from a physical table name.
-     * - splits by non-alphanumeric (underscore etc.)
-     * - singularizes each chunk
-     * - capitalizes each chunk
+     * Build default entity class name from a physical table name.
      *
-     *  "users"              -> "User"
-     *  "user_profiles"      -> "UserProfile"
-     *  "BATCHES_HISTORY"    -> "BatchHistory"
-     *  "audit_logs_entries" -> "AuditLogEntry"
+     * Rules:
+     * 1. If the table name already contains uppercase letters (CamelCase style) and
+     *    doesn't contain underscores/hyphens, we keep its internal capitalization and
+     *    only singularize the tail.
+     *
+     *    "DetectionMean"      -> "DetectionMean"
+     *    "ProblemType"        -> "ProblemType"
+     *
+     * 2. Else we split on non-alphanumeric separators, singularize each chunk (basic English:
+     *    users -> user, batches -> batch, companies -> company), capitalize and concat.
+     *
+     *    "users"                -> "User"
+     *    "user_profiles"        -> "UserProfile"
+     *    "BATCHES_HISTORY"      -> "BatchHistory"
+     *    "phases_problem"       -> "PhasesProblem"
      */
     public static String defaultEntityName(String tableName) {
         if (tableName == null || tableName.isBlank()) {
             return tableName;
         }
 
-        String[] parts = tableName
-                .toLowerCase(Locale.ROOT)
-                .split("[^a-zA-Z0-9]+");
+        boolean looksCamel = tableName.matches(".*[A-Z].*")
+                && !tableName.contains("_")
+                && !tableName.contains("-");
 
+        if (looksCamel) {
+            // Keep internal caps, just singularize crudely
+            return capitalize(singularize(tableName));
+        }
+
+        String[] parts = tableName.split("[^A-Za-z0-9]+");
         StringBuilder sb = new StringBuilder();
         for (String p : parts) {
             if (p.isBlank()) continue;
-            String singular = singularize(p);
+            String singular = singularize(p.toLowerCase(Locale.ROOT));
             sb.append(capitalize(singular));
         }
         return sb.toString();
     }
 
     /**
-     * Super basic plural -> singular heuristic, English-ish.
-     * It's intentionally simple:
-     *   "users" -> "user"
-     *   "profiles" -> "profile"
-     *   "batches" -> "batch"
-     *   "companies" -> "company"
-     *   "logs" -> "log"
-     *
-     * We keep it intentionally dumb, not NLP-perfect, just good enough for 90%.
+     * Naive plural -> singular heuristic.
      */
     private static String singularize(String word) {
-        String w = word.toLowerCase(Locale.ROOT);
+        String w = word;
+        String lw = w.toLowerCase(Locale.ROOT);
 
         // companies -> company
-        if (w.endsWith("ies") && w.length() > 3) {
+        if (lw.endsWith("ies") && w.length() > 3) {
             return w.substring(0, w.length() - 3) + "y";
         }
 
-        // batches -> batch, classes -> class, boxes -> box
-        if ((w.endsWith("ses")
-                || w.endsWith("xes")
-                || w.endsWith("zes")
-                || w.endsWith("ches")
-                || w.endsWith("shes"))
+        // batches -> batch, classes -> class, boxes -> box, crashes -> crash
+        if ((lw.endsWith("ses")
+                || lw.endsWith("xes")
+                || lw.endsWith("zes")
+                || lw.endsWith("ches")
+                || lw.endsWith("shes"))
                 && w.length() > 3) {
-            return w.substring(0, w.length() - 2); // drop "es"
+            return w.substring(0, w.length() - 2);
         }
 
-        // generic plural -> singular
-        if (w.endsWith("s") && w.length() > 1) {
+        // generic plural: users -> user, problems -> problem
+        if (lw.endsWith("s") && w.length() > 1) {
             return w.substring(0, w.length() - 1);
         }
 
@@ -102,6 +107,6 @@ public final class NamingUtils {
     private static String capitalize(String s) {
         if (s == null || s.isBlank()) return s;
         if (s.length() == 1) return s.toUpperCase(Locale.ROOT);
-        return s.substring(0,1).toUpperCase(Locale.ROOT) + s.substring(1);
+        return s.substring(0, 1).toUpperCase(Locale.ROOT) + s.substring(1);
     }
 }

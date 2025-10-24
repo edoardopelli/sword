@@ -1,249 +1,163 @@
-# 🗡️ S.W.O.R.D.
+# 🗡️ S.W.O.R.D. — Schema-Wide Object Reverse Designer
 
-**S.W.O.R.D. — Schema-Wide Object Reverse Designer**
+**S.W.O.R.D.** is a standalone Java tool for reverse-engineering relational databases into fully annotated **JPA entities** with **Lombok** support.
 
-S.W.O.R.D. is a command-line tool that performs **reverse engineering** of relational databases into **JPA entities**.  
-It automatically inspects a live database schema, infers table relationships, detects composite keys, and generates well-structured, annotated entity classes (optionally with Lombok, `@Embeddable` IDs, and Hibernate JSON mappings).
+The tool connects to an existing relational schema, reads metadata (tables, columns, constraints, keys, etc.), and generates clean, consistent entity classes in Java.
 
 ---
 
-## ⚙️ Acronym Meaning
+## 🧩 Acronym Meaning
 
-> **S.W.O.R.D.** stands for **Schema-Wide Object Reverse Designer**
-
-The name reflects its purpose:  
-it *cuts through* relational complexity to craft clean, object-oriented representations of your data model.
+**S.W.O.R.D.** = **Schema-Wide Object Reverse Designer**  
+Because it cuts through complex schemas and forges structured JPA entities from raw database metadata.
 
 ---
 
 ## 🚀 Features
 
-- **Interactive CLI Wizard** — guides you step-by-step to connect to your database and generate entities.  
-- **Multi-database support**:
-  - PostgreSQL
-  - MariaDB
-  - MySQL
-  - Microsoft SQL Server
-  - H2
-  - IBM DB2
-- **Automatic detection** of:
-  - Schemas and catalogs (based on the DB type)
-  - Primary and composite keys (`@Id` / `@EmbeddedId`)
-  - Foreign keys (`@ManyToOne`, `@OneToMany`)
-  - JSON / JSONB columns (`Map<String,Object>` with `@JdbcTypeCode(SqlTypes.JSON)`)
-- **Type-safe mapping** from SQL types to Java types (`VARCHAR → String`, `TIMESTAMP → OffsetDateTime`, etc.)
-- **Customizable output**:
-  - Choose base package (e.g. `com.example.entities`)
-  - Choose target path (defaults to the current working directory)
-  - Optional Lombok integration
-- **Clean, compilable output** ready to plug into Spring Boot or Jakarta EE projects.
+- Reverse-engineers entire relational schemas into annotated JPA entities.
+- Generates Lombok annotations (`@Data`, `@Builder`, etc.) for clean, boilerplate-free code.
+- Handles:
+  - `@EmbeddedId` for composite primary keys.
+  - `@GeneratedValue` for identity, serial, and sequence columns.
+  - Optional `@OneToOne` / `@ManyToOne` relationships.
+  - `json` / `jsonb` columns → `Map<String,Object>`.
+- Supports PostgreSQL, MariaDB, MySQL, SQL Server, H2, and IBM DB2.
+- Allows custom naming configuration through a YAML file.
+- Fully interactive console wizard for setup and generation.
 
 ---
 
-## 🧭 Getting Started
+## 🏗️ Generation Flow
 
-### 1. Build
+When you start S.W.O.R.D., the wizard runs interactively:
 
-```bash
-mvn clean package
+1. Choose the JDBC driver.
+2. Provide connection details (host, port, username, password, database).
+3. Select the schema or catalog.
+4. Choose:
+   - Base package (e.g., `com.example.entities`)
+   - Output path (default: current working directory)
+5. Choose FK mode:
+   - SCALAR → generates `Long companyId`
+   - RELATION → generates `Company company`
+6. Generation begins.
+
+---
+
+## 🧠 Default Naming Strategy
+
+### Table → Entity examples
+```
+users -> User
+incident_types -> IncidentType
+PBS_CODE -> PbsCode
 ```
 
-This produces a runnable JAR file under `target/sword.jar`.
-
-### 2. Run the Tool
-
-```bash
-java -jar target/sword.jar
+### Column → Property examples
+```
+problem_id -> problemId
+ASSET_CODE -> assetCode
+PBSCode -> pBSCode
 ```
 
-You’ll be guided through an **interactive setup**:
+---
 
-1. **Select JDBC driver**
-   ```
-   [1] PostgreSQL
-   [2] MariaDB
-   [3] MySQL
-   [4] Microsoft SQL Server
-   [5] H2
-   [6] IBM DB2
-   Choose database: 1
-   ```
+## ⚙️ Optional YAML Naming Overrides
 
-2. **Enter connection details**  
-   Example for PostgreSQL:
-   ```
-   Host [default: localhost]: 
-   Port [default: 5432]: 
-   Username: myuser
-   Password: ********
-   ```
+You can override generated names using a YAML configuration file.  
+Pass the file path when starting the JAR:
 
-3. **Select schema/catalog**  
-   Depending on the chosen database, S.W.O.R.D. will display available **schemas** or **catalogs**.  
-   ```
-   Available schemas:
-   [1] public
-   [2] audit
-   Choose schema: 1
-   ```
+```
+java -jar target/sword-0.1.0-SNAPSHOT.jar --naming-file=/path/to/naming-overrides.yml
+```
+or
+```
+java -jar target/sword-0.1.0-SNAPSHOT.jar --namingFile=/path/to/naming-overrides.yml
+```
 
-4. **Define base package and output path**  
-   ```
-   Base package [default: com.example.entities]:
-   Output path [default: /path/where/you/launched/sword]:
-   ```
+If omitted, default naming rules are applied.
 
-5. **Confirm and generate**
-   ```
-   Generating entities from schema 'public'...
-   ✓ ProblemsIncidents.java
-   ✓ ProblemsIncidentsId.java
-   ✓ Incident.java
-   ✓ FailureMode.java
-   ...
-   Generation complete. 42 entities created.
-   ```
-
-
-## Entity naming
-
-By default, S.W.O.R.D. generates one JPA entity per physical table.
-
-### Default naming strategy
-
-For each table name, S.W.O.R.D. creates a Java class name by:
-1. Splitting the table name on underscores / non-alphanumeric characters.
-2. Singularizing each chunk in a simple English-ish way (e.g. `users` → `user`, `profiles` → `profile`, `companies` → `company`, `batches` → `batch`).
-3. Capitalizing and concatenating the chunks.
-
-
-The same naming rule is also used to build the `<EntityName>Id` class for composite primary keys.  
-So a table called `user_profiles` will generate:
-- `UserProfile.java`
-- `UserProfileId.java` (if the PK is composite)
-
-
-### Overriding names with `sword.yml`
-
-You can override the generated class names on a per-table basis without touching code.
-
-Create a file called `sword.yml` **in the same working directory where you run `java -jar sword-...jar`**.
-
-Example `sword.yml`:
+### Example `naming-overrides.yml`
 
 ```yaml
 tables:
-  fracas_events: Event
-  app_users: AccountUser
-  company_branches: Branch
+  problems:
+    entityName: Problem
+    columns:
+      problem_id: id
+      problem_type: type
+  incidents:
+    entityName: Incident
+    columns:
+      incident_id: id
+      INCIDENT_SEVERITY: severityLevel
+  alarm_events:
+    entityName: AlarmEvent
+    columns:
+      event_code: code
+      event_timestamp: timestamp
+```
+
+All unmapped tables and columns follow the default naming logic.
+
 ---
 
-## 🏗️ Output Example
+## 🧩 Supported Databases
 
-Generated entities are stored under your chosen package path:
+PostgreSQL (port 5432)  
+MariaDB (port 3306)  
+MySQL (port 3306)  
+SQL Server (port 1433)  
+H2 (port 9092)  
+IBM DB2 (port 50000)
 
-```
-src/
- └─ main/
-     └─ java/
-         └─ com/
-             └─ example/
-                 └─ entities/
-                     ├─ ProblemsIncidents.java
-                     ├─ ProblemsIncidentsId.java
-                     ├─ Incident.java
-                     └─ FailureMode.java
-```
+---
 
-A sample entity:
+## 🧰 Example Generated Class
 
 ```java
-@Entity
-@Table(name = "problems_incidents")
 @Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ProblemsIncidents {
+@Entity
+@Table(name = "incidents")
+@Generated(value = "S.W.O.R.D.", date = "2025-10-24T21:00:00Z")
+public class Incident {
 
-    @EmbeddedId
-    private ProblemsIncidentsId id;
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @ToString.Include
+    @EqualsAndHashCode.Include
+    @Column(name = "incident_id")
+    private Long id;
+
+    @Column(name = "incident_description")
+    private String description;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "incident_id", insertable = false, updatable = false)
-    private Incident incident;
-
-    @Column(name = "details", columnDefinition = "jsonb")
-    @JdbcTypeCode(SqlTypes.JSON)
-    private Map<String, Object> details;
+    @JoinColumn(name = "problem_id")
+    private Problem problem;
 }
 ```
 
 ---
 
-## 🧩 Planned Enhancements
+## 📦 Output Example
 
-- [ ] Generate repository interfaces (`JpaRepository`)
-- [ ] Generate DTOs and MapStruct mappers
-- [ ] Add command-line flags for non-interactive mode
-- [ ] Add YAML configuration file for reusable setups
-- [ ] Support automatic relation inference for bridge tables
-- [ ] Add template engine (Freemarker/Velocity) for custom code style
-
----
-
-## 🧠 Tech Stack
-
-| Component | Library / Framework |
-|------------|--------------------|
-| CLI        | [picocli](https://picocli.info) |
-| Code Generation | [JavaPoet](https://github.com/square/javapoet) |
-| JDBC Metadata | Standard JDBC API |
-| Optional JSON Serialization | Jackson |
-| Supported Databases | PostgreSQL, MariaDB, MySQL, MSSQL, H2, DB2 |
-
----
-
-## 🛠️ Example CLI Usage (non-interactive mode, future feature)
-
-```bash
-java -jar sword.jar   --db postgres   --host localhost   --port 5432   --user myuser   --pass mypass   --schema public   --package com.example.entities   --out ./generated
+```
+/Users/edoardo/Documents/workspaces/sword-output/
+└── com/example/entities/
+    ├── Problem.java
+    ├── Incident.java
+    ├── AlarmEvent.java
+    └── IncidentId.java
 ```
 
 ---
 
-## 🏴‍☠️ Project Structure
+## 🧾 License
 
-```
-sword/
- ├─ src/main/java/org/cheetah/sword/
- │   ├─ Main.java               → CLI entry point
- │   ├─ SwordWizard.java        → Interactive setup
- │   ├─ MetadataReader.java     → Extracts table/column metadata
- │   ├─ EntityGenerator.java    → Generates JPA entities
- │   ├─ SqlTypeMapper.java      → Maps SQL → Java types
- │   └─ util/
- │       ├─ NamingUtils.java
- │       └─ JsonTypeHandler.java
- ├─ pom.xml
- ├─ README.md
- └─ LICENSE
-```
-
----
-
-## 🧑‍💻 Author
-
-**S.W.O.R.D.** is developed and maintained by the **Cheetah Engineering Team**  
-Lead developer: *Edoardo Pelli*
-
----
-
-## 🧷 License
-
-MIT License — you are free to use, modify, and distribute this software with attribution.
-
----
-
-## 🗡️ Motto
-
-> *"Cut through the schema — forge your entities with S.W.O.R.D."*
+S.W.O.R.D. is released under the Apache 2.0 License.  
+© 2025 Cheetah Software Labs. All rights reserved.

@@ -3,6 +3,7 @@ package org.cheetah.sword.wizard;
 import org.cheetah.sword.events.Events.*;
 import org.cheetah.sword.model.ConnectionConfig;
 import org.cheetah.sword.model.DbType;
+import org.cheetah.sword.model.FkMode;
 import org.cheetah.sword.model.SchemaSelection;
 import org.cheetah.sword.service.MetadataService;
 import org.jline.reader.LineReader;
@@ -44,24 +45,24 @@ public class SwordWizard {
             println(terminal, "Select database type:");
             DbType[] vals = DbType.values();
             for (int i = 0; i < vals.length; i++) {
-                println(terminal, "  [" + (i+1) + "] " + vals[i].displayName());
+                println(terminal, "  [" + (i + 1) + "] " + vals[i].displayName());
             }
             int choice = Integer.parseInt(reader.readLine("Choose [1-" + vals.length + "]: "));
-            DbType db = vals[choice-1];
+            DbType db = vals[choice - 1];
 
             String host = readDefault(reader, "Host", "localhost");
             String portStr = readDefault(reader, "Port", String.valueOf(db.defaultPort()));
             int port = Integer.parseInt(portStr);
             String user = reader.readLine("Username: ");
-            String pass = reader.readLine("Password: ", (char)0);
+            String pass = reader.readLine("Password: ", (char) 0);
 
-            // Database name input
+            // Nome db
             String dbLabel = switch (db) {
                 case POSTGRES -> "Database name (e.g., postgres, mydb)";
-                case MSSQL   -> "Database name (default: master)";
-                case DB2     -> "Database name (default: SAMPLE)";
-                case H2      -> "Database/path (e.g., ~/test)";
-                default      -> "Database name (optional for MySQL/MariaDB)";
+                case MSSQL -> "Database name (default: master)";
+                case DB2 -> "Database name (default: SAMPLE)";
+                case H2 -> "Database/path (e.g., ~/test)";
+                default -> "Database name (optional for MySQL/MariaDB)";
             };
             String dbDefault = db.defaultDatabase();
             if (db == DbType.MYSQL || db == DbType.MARIADB) dbDefault = "";
@@ -75,7 +76,6 @@ public class SwordWizard {
             cfg.setPassword(pass);
             cfg.setDbName(dbName);
 
-            // test connessione
             println(terminal, "\nConnecting to " + db.displayName() + " ...");
             try (Connection conn = metadata.open(cfg)) {
                 println(terminal, "✓ Connected.");
@@ -83,9 +83,9 @@ public class SwordWizard {
 
             publisher.publishEvent(new ConnectionReadyEvent(cfg));
 
-            // scelta catalog/schema
+            // Selezione catalog/schema
             String chosenCatalog = null;
-            String chosenSchema  = null;
+            String chosenSchema = null;
 
             try (Connection conn = metadata.open(cfg)) {
                 if (db.usesCatalog()) {
@@ -93,10 +93,10 @@ public class SwordWizard {
                     if (!catalogs.isEmpty()) {
                         println(terminal, "\nAvailable catalogs:");
                         for (int i = 0; i < catalogs.size(); i++) {
-                            println(terminal, "  [" + (i+1) + "] " + catalogs.get(i));
+                            println(terminal, "  [" + (i + 1) + "] " + catalogs.get(i));
                         }
                         int idx = Integer.parseInt(reader.readLine("Choose catalog [1-" + catalogs.size() + "]: "));
-                        chosenCatalog = catalogs.get(idx-1);
+                        chosenCatalog = catalogs.get(idx - 1);
                     } else if (!(db == DbType.MYSQL || db == DbType.MARIADB)) {
                         chosenCatalog = (dbName == null || dbName.isBlank()) ? db.defaultDatabase() : dbName;
                     }
@@ -107,31 +107,39 @@ public class SwordWizard {
                     if (!schemas.isEmpty()) {
                         println(terminal, "\nAvailable schemas:");
                         for (int i = 0; i < schemas.size(); i++) {
-                            println(terminal, "  [" + (i+1) + "] " + schemas.get(i));
+                            println(terminal, "  [" + (i + 1) + "] " + schemas.get(i));
                         }
                         int idx = Integer.parseInt(reader.readLine("Choose schema [1-" + schemas.size() + "]: "));
-                        chosenSchema = schemas.get(idx-1);
+                        chosenSchema = schemas.get(idx - 1);
                     } else {
                         if (db == DbType.POSTGRES) chosenSchema = "public";
-                        if (db == DbType.MSSQL)    chosenSchema = "dbo";
-                        if (db == DbType.H2)       chosenSchema = "PUBLIC";
+                        if (db == DbType.MSSQL) chosenSchema = "dbo";
+                        if (db == DbType.H2) chosenSchema = "PUBLIC";
                     }
                 }
             }
 
             SchemaSelection selection = new SchemaSelection(chosenCatalog, chosenSchema);
 
-            // package name
+            // package base per le entity
             String basePkgRaw = readDefault(reader, "Base package", "com.example.entities");
-            // 👇 normalizzazione: se l'utente mette "org/cheetah/fracas/entities"
-            // lo trasformiamo in "org.cheetah.fracas.entities"
-            String basePkg = normalizePackage(basePkgRaw);
+            String basePkgNormalized = normalizePackage(basePkgRaw);
 
-            // output path
-            String outPath = readDefault(reader, "Output path", Path.of("").toAbsolutePath().toString());
+            // output path radice
+            String outPath = readDefault(reader,
+                    "Output path",
+                    Path.of("").toAbsolutePath().toString());
 
-            cfg.setBasePackage(basePkg);
+            // FK mode
+            println(terminal, "\nForeign key mapping mode:");
+            println(terminal, "  [1] Scalar FK fields  (Long customerId)  <-- default (no lazy issues)");
+            println(terminal, "  [2] Relations         (@ManyToOne / @OneToOne)");
+            String fkChoice = readDefault(reader, "Choose [1-2]", "1");
+            FkMode fkMode = "2".equals(fkChoice.trim()) ? FkMode.RELATION : FkMode.SCALAR;
+
+            cfg.setBasePackage(basePkgNormalized);
             cfg.setOutputPath(Path.of(outPath));
+            cfg.setFkMode(fkMode);
 
             publisher.publishEvent(new SchemaChosenEvent(cfg, selection));
             publisher.publishEvent(new GenerateRequestedEvent(cfg, selection));
@@ -152,24 +160,18 @@ public class SwordWizard {
     }
 
     /**
-     * Normalizza il package:
-     * - converte / e \ in .
-     * - rimuove doppi punti consecutivi
-     * - toglie eventuali . iniziali/finali
+     * Normalizza l’input dell'utente:
+     *  - "org/cheetah/entities" -> "org.cheetah.entities"
+     *  - "org.cheetah.entities" -> "org.cheetah.entities"
      */
     private static String normalizePackage(String raw) {
         if (raw == null) return "";
-        // 1. sostituisci / e \ con .
         String p = raw.replace('/', '.')
-                      .replace('\\', '.')
-                      .trim();
-        // 2. collassa .. multipli
-        while (p.contains("..")) {
-            p = p.replace("..", ".");
-        }
-        // 3. togli . iniziali/finali
+                .replace('\\', '.')
+                .trim();
+        while (p.contains("..")) p = p.replace("..", ".");
         if (p.startsWith(".")) p = p.substring(1);
-        if (p.endsWith(".")) p = p.substring(0, p.length()-1);
+        if (p.endsWith(".")) p = p.substring(0, p.length() - 1);
         return p;
     }
 }
