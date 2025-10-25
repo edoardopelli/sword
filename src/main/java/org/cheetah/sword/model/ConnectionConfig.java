@@ -2,6 +2,12 @@ package org.cheetah.sword.model;
 
 import java.nio.file.Path;
 
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
 /**
  * Carries: - Database connection info (dbType, host, port, username, password,
  * dbName) - Logical selection info (catalog, schema) - Code generation
@@ -26,6 +32,10 @@ import java.nio.file.Path;
  *
  * generateDto If true, DTOs and MapStruct mappers will also be generated.
  */
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class ConnectionConfig {
 
 	private DbType dbType;
@@ -44,131 +54,18 @@ public class ConnectionConfig {
 	private FkMode fkMode = FkMode.SCALAR;
 	private RelationFetch relationFetch = RelationFetch.LAZY;
 
+	@Builder.Default
+	@Getter
 	private boolean generateDto = false;
+
+	@Builder.Default
+	@Getter
 	private boolean generateRepositories = false;
+	
+	@Getter
+	@Builder.Default
+	private boolean generateServices = false;
+	
+	
 
-	public boolean getGenerateRepositories() {
-		return generateRepositories;
-	}
-
-	public void setGenerateRepositories(boolean generateRepositories) {
-		this.generateRepositories = generateRepositories;
-	}
-
-	// dbType
-	public DbType getDbType() {
-		return dbType;
-	}
-
-	public void setDbType(DbType dbType) {
-		this.dbType = dbType;
-	}
-
-	// host
-	public String getHost() {
-		return host;
-	}
-
-	public void setHost(String host) {
-		this.host = host;
-	}
-
-	// port
-	public int getPort() {
-		return port;
-	}
-
-	public void setPort(int port) {
-		this.port = port;
-	}
-
-	// username
-	public String getUsername() {
-		return username;
-	}
-
-	public void setUsername(String username) {
-		this.username = username;
-	}
-
-	// password
-	public String getPassword() {
-		return password;
-	}
-
-	public void setPassword(String password) {
-		this.password = password;
-	}
-
-	// dbName
-	public String getDbName() {
-		return dbName;
-	}
-
-	public void setDbName(String dbName) {
-		this.dbName = dbName;
-	}
-
-	// catalog
-	public String getCatalog() {
-		return catalog;
-	}
-
-	public void setCatalog(String catalog) {
-		this.catalog = catalog;
-	}
-
-	// schema
-	public String getSchema() {
-		return schema;
-	}
-
-	public void setSchema(String schema) {
-		this.schema = schema;
-	}
-
-	// basePackage
-	public String getBasePackage() {
-		return basePackage;
-	}
-
-	public void setBasePackage(String basePackage) {
-		this.basePackage = basePackage;
-	}
-
-	// outputPath
-	public Path getOutputPath() {
-		return outputPath;
-	}
-
-	public void setOutputPath(Path outputPath) {
-		this.outputPath = outputPath;
-	}
-
-	// fkMode
-	public FkMode getFkMode() {
-		return fkMode;
-	}
-
-	public void setFkMode(FkMode fkMode) {
-		this.fkMode = fkMode;
-	}
-
-	// relationFetch
-	public RelationFetch getRelationFetch() {
-		return relationFetch;
-	}
-
-	public void setRelationFetch(RelationFetch relationFetch) {
-		this.relationFetch = relationFetch;
-	}
-
-	// generateDto
-	public boolean getGenerateDto() {
-		return generateDto;
-	}
-
-	public void setGenerateDto(boolean generateDto) {
-		this.generateDto = generateDto;
-	}
 }

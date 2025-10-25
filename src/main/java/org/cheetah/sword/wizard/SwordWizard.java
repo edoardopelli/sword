@@ -38,6 +38,7 @@ import java.util.List;
  *    - relation fetch mode (LAZY vs EAGER) ONLY IF fkMode == RELATION
  *    - DTO/mapping generation (yes/no)
  *    - Repository generation (yes/no)
+ *    - Service generation (yes/no)
  * 6. Emit GenerateRequestedEvent to start entity generation.
  *
  * Uses JLine for terminal IO.
@@ -210,13 +211,21 @@ public class SwordWizard {
             boolean generateDto = dtoChoice.equalsIgnoreCase("y") || dtoChoice.equalsIgnoreCase("yes");
             cfg.setGenerateDto(generateDto);
 
-            // Repository generation (NEW)
+            // Repository generation
             println(terminal, "\nRepository generation:");
             println(terminal, "  [y] Generate Spring Data repositories");
             println(terminal, "  [n] Do not generate repositories (default)");
             String repoChoice = readDefault(reader, "Generate repositories? [y/N]", "n");
             boolean generateRepositories = repoChoice.equalsIgnoreCase("y") || repoChoice.equalsIgnoreCase("yes");
             cfg.setGenerateRepositories(generateRepositories);
+
+            // Service generation (NEW)
+            println(terminal, "\nService generation:");
+            println(terminal, "  [y] Generate Spring services (CRUD + pagination)");
+            println(terminal, "  [n] Do not generate services (default)");
+            String svcChoice = readDefault(reader, "Generate services? [y/N]", "n");
+            boolean generateServices = svcChoice.equalsIgnoreCase("y") || svcChoice.equalsIgnoreCase("yes");
+            cfg.setGenerateServices(generateServices);
 
             // Summary
             println(terminal, "\nGeneration plan:");
@@ -229,8 +238,9 @@ public class SwordWizard {
             println(terminal, "  Output path       : " + cfg.getOutputPath());
             println(terminal, "  FK mode           : " + cfg.getFkMode());
             println(terminal, "  Relation fetch    : " + cfg.getRelationFetch());
-            println(terminal, "  Generate DTO      : " + cfg.getGenerateDto());
-            println(terminal, "  Generate Repo     : " + cfg.getGenerateRepositories());
+            println(terminal, "  Generate DTO      : " + cfg.isGenerateDto());
+            println(terminal, "  Generate Repo     : " + cfg.isGenerateRepositories());
+            println(terminal, "  Generate Service  : " + cfg.isGenerateServices());
 
             // Fire events
             publisher.publishEvent(new SchemaChosenEvent(cfg, selection));
