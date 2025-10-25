@@ -109,4 +109,21 @@ public final class NamingUtils {
         if (s.length() == 1) return s.toUpperCase(Locale.ROOT);
         return s.substring(0, 1).toUpperCase(Locale.ROOT) + s.substring(1);
     }
+
+	public static String pluralizeSimpleName(String simpleName) {
+	
+        if (simpleName == null || simpleName.isBlank()) {
+            return simpleName;
+        }
+        char last = simpleName.charAt(simpleName.length() - 1);
+        if (last == 's' || last == 'S') {
+            return simpleName;
+        }
+        return simpleName + "s";
+    }
+
+	public static String upperFirst(String fieldName) {
+        if (fieldName == null || fieldName.isBlank()) return fieldName;
+        return Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+	}
 }

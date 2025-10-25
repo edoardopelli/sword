@@ -55,16 +55,16 @@ public class ConnectionConfig {
 	private RelationFetch relationFetch = RelationFetch.LAZY;
 
 	@Builder.Default
-	@Getter
 	private boolean generateDto = false;
 
 	@Builder.Default
-	@Getter
 	private boolean generateRepositories = false;
 	
-	@Getter
 	@Builder.Default
 	private boolean generateServices = false;
+	
+	@Builder.Default
+	private boolean generateControllers = false;
 	
 	
 

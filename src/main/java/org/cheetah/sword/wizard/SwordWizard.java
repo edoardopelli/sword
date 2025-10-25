@@ -227,6 +227,14 @@ public class SwordWizard {
             boolean generateServices = svcChoice.equalsIgnoreCase("y") || svcChoice.equalsIgnoreCase("yes");
             cfg.setGenerateServices(generateServices);
 
+            // Service generation (NEW)
+            println(terminal, "\nService generation:");
+            println(terminal, "  [y] Generate Spring controllers (CRUD + pagination)");
+            println(terminal, "  [n] Do not generate controller (default)");
+            String cntChoice = readDefault(reader, "Generate controllers? [y/N]", "n");
+            boolean generateControllers = cntChoice.equalsIgnoreCase("y") || cntChoice.equalsIgnoreCase("yes");
+            cfg.setGenerateControllers(generateControllers);
+            
             // Summary
             println(terminal, "\nGeneration plan:");
             println(terminal, "  DB Vendor         : " + db.displayName());
@@ -238,9 +246,10 @@ public class SwordWizard {
             println(terminal, "  Output path       : " + cfg.getOutputPath());
             println(terminal, "  FK mode           : " + cfg.getFkMode());
             println(terminal, "  Relation fetch    : " + cfg.getRelationFetch());
-            println(terminal, "  Generate DTO      : " + cfg.isGenerateDto());
-            println(terminal, "  Generate Repo     : " + cfg.isGenerateRepositories());
-            println(terminal, "  Generate Service  : " + cfg.isGenerateServices());
+            println(terminal, "  Generate DTOs      : " + cfg.isGenerateDto());
+            println(terminal, "  Generate Repos     : " + cfg.isGenerateRepositories());
+            println(terminal, "  Generate Services  : " + cfg.isGenerateServices());
+            println(terminal, "  Generate Controllers  : " + cfg.isGenerateControllers());
 
             // Fire events
             publisher.publishEvent(new SchemaChosenEvent(cfg, selection));
