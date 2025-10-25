@@ -51,7 +51,9 @@ public class ConnectionConfig {
 	private String basePackage;
 	private Path outputPath;
 
+	@Builder.Default
 	private FkMode fkMode = FkMode.SCALAR;
+	@Builder.Default
 	private RelationFetch relationFetch = RelationFetch.LAZY;
 
 	@Builder.Default
@@ -66,6 +68,10 @@ public class ConnectionConfig {
 	@Builder.Default
 	private boolean generateServices = false;
 	
+	@Getter
+	@Builder.Default
+	private boolean generateControllers = false;
 	
+	private String yamlConfigPath;
 
 }

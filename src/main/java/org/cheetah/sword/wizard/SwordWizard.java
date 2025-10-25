@@ -39,6 +39,8 @@ import java.util.List;
  *    - DTO/mapping generation (yes/no)
  *    - Repository generation (yes/no)
  *    - Service generation (yes/no)
+ *    - Controller generation (yes/no)
+ *    - YAML mapping file path (optional)
  * 6. Emit GenerateRequestedEvent to start entity generation.
  *
  * Uses JLine for terminal IO.
@@ -219,7 +221,7 @@ public class SwordWizard {
             boolean generateRepositories = repoChoice.equalsIgnoreCase("y") || repoChoice.equalsIgnoreCase("yes");
             cfg.setGenerateRepositories(generateRepositories);
 
-            // Service generation (NEW)
+            // Service generation
             println(terminal, "\nService generation:");
             println(terminal, "  [y] Generate Spring services (CRUD + pagination)");
             println(terminal, "  [n] Do not generate services (default)");
@@ -227,20 +229,37 @@ public class SwordWizard {
             boolean generateServices = svcChoice.equalsIgnoreCase("y") || svcChoice.equalsIgnoreCase("yes");
             cfg.setGenerateServices(generateServices);
 
+            // Controller generation (NEW)
+            println(terminal, "\nController generation:");
+            println(terminal, "  [y] Generate REST controllers");
+            println(terminal, "  [n] Do not generate controllers (default)");
+            String ctlChoice = readDefault(reader, "Generate controllers? [y/N]", "n");
+            boolean generateControllers = ctlChoice.equalsIgnoreCase("y") || ctlChoice.equalsIgnoreCase("yes");
+            cfg.setGenerateControllers(generateControllers);
+
+            // YAML mapping file path (optional)
+            String yamlPath = readDefault(reader, "YAML mapping file path (optional, empty = none)", "");
+            if (yamlPath != null && yamlPath.isBlank()) {
+                yamlPath = null;
+            }
+            cfg.setYamlConfigPath(yamlPath);
+
             // Summary
             println(terminal, "\nGeneration plan:");
-            println(terminal, "  DB Vendor         : " + db.displayName());
-            println(terminal, "  Host              : " + cfg.getHost() + ":" + cfg.getPort());
-            println(terminal, "  Database          : " + cfg.getDbName());
-            println(terminal, "  Catalog           : " + cfg.getCatalog());
-            println(terminal, "  Schema            : " + cfg.getSchema());
-            println(terminal, "  Base package      : " + cfg.getBasePackage());
-            println(terminal, "  Output path       : " + cfg.getOutputPath());
-            println(terminal, "  FK mode           : " + cfg.getFkMode());
-            println(terminal, "  Relation fetch    : " + cfg.getRelationFetch());
-            println(terminal, "  Generate DTO      : " + cfg.isGenerateDto());
-            println(terminal, "  Generate Repo     : " + cfg.isGenerateRepositories());
-            println(terminal, "  Generate Service  : " + cfg.isGenerateServices());
+            println(terminal, "  DB Vendor           : " + db.displayName());
+            println(terminal, "  Host                : " + cfg.getHost() + ":" + cfg.getPort());
+            println(terminal, "  Database            : " + cfg.getDbName());
+            println(terminal, "  Catalog             : " + cfg.getCatalog());
+            println(terminal, "  Schema              : " + cfg.getSchema());
+            println(terminal, "  Base package        : " + cfg.getBasePackage());
+            println(terminal, "  Output path         : " + cfg.getOutputPath());
+            println(terminal, "  FK mode             : " + cfg.getFkMode());
+            println(terminal, "  Relation fetch      : " + cfg.getRelationFetch());
+            println(terminal, "  Generate DTO        : " + cfg.isGenerateDto());
+            println(terminal, "  Generate Repo       : " + cfg.isGenerateRepositories());
+            println(terminal, "  Generate Service    : " + cfg.isGenerateServices());
+            println(terminal, "  Generate Controller : " + cfg.isGenerateControllers());
+            println(terminal, "  YAML mapping file   : " + cfg.getYamlConfigPath());
 
             // Fire events
             publisher.publishEvent(new SchemaChosenEvent(cfg, selection));
