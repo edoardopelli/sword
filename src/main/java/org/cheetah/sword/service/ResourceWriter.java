@@ -7,6 +7,7 @@ import java.util.List;
 import javax.lang.model.element.Modifier;
 
 import org.cheetah.sword.service.records.ScalarFieldInfo;
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
@@ -36,8 +37,7 @@ public class ResourceWriter {
      * @param scalarFieldInfos List of scalar fields (name + java type) collected during entity inspection.
      * @param generatedAnn     @Generated annotation to be applied on generated types.
      */
-    public void writeResource(String resourcesPackage,
-                              Path rootPath,
+    public void writeResource(Path rootPath,
                               String entitySimpleName,
                               TypeName idType,
                               List<ScalarFieldInfo> scalarFieldInfos,
@@ -61,6 +61,6 @@ public class ResourceWriter {
             type.addField(FieldSpec.builder(f.javaType(), f.javaFieldName(), Modifier.PRIVATE).build());
         }
 
-        JavaFile.builder(resourcesPackage, type.build()).build().writeTo(rootPath);
+        JavaFile.builder(SwordWizard.RESOURCES_PKG, type.build()).build().writeTo(rootPath);
     }
 }

@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.List;
 import javax.lang.model.element.Modifier;
 
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
@@ -32,19 +33,16 @@ public class ResourceMapperWriter {
      * @param entitySimpleName Simple name (e.g. "Incident").
      * @param generatedAnn     Generated annotation for traceability.
      */
-    public void writeResourceMapper(String mappersPackage,
-                                    String dtoPackage,
-                                    String resourcesPackage,
-                                    Path rootPath,
+    public void writeResourceMapper(Path rootPath,
                                     String entitySimpleName,
                                     AnnotationSpec generatedAnn) throws IOException {
 
-        String dtoName = entitySimpleName + "DTO";
+        String dtoName = entitySimpleName + "Dto";
         String resourceName = entitySimpleName + "Resource";
         String mapperName = entitySimpleName + "ResourceMapper";
 
-        ClassName dtoType = ClassName.get(dtoPackage, dtoName);
-        ClassName resourceType = ClassName.get(resourcesPackage, resourceName);
+        ClassName dtoType = ClassName.get(SwordWizard.DTO_PKG, dtoName);
+        ClassName resourceType = ClassName.get(SwordWizard.RESOURCES_PKG, resourceName);
         ClassName listType = ClassName.get("java.util", "List");
         ClassName mapperAnn = ClassName.get("org.mapstruct", "Mapper");
 
@@ -83,6 +81,6 @@ public class ResourceMapperWriter {
             .addMethods(Arrays.asList(toResource, toDto, toResourceList, toDtoList))
             .build();
 
-        JavaFile.builder(mappersPackage, type).build().writeTo(rootPath);
+        JavaFile.builder(SwordWizard.RESOURCE_MAPPERS_PKG, type).build().writeTo(rootPath);
     }
 }

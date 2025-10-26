@@ -22,7 +22,9 @@ import org.cheetah.sword.service.records.ColumnModel;
 import org.cheetah.sword.service.records.EntityModel;
 import org.cheetah.sword.service.records.ScalarFieldInfo;
 import org.cheetah.sword.service.records.SimpleFkModel;
+import org.cheetah.sword.util.NamingUtils;
 import org.cheetah.sword.util.SqlTypeMapper;
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
@@ -46,15 +48,14 @@ public class EntityFilesWriter {
 	private final NamingConfigService namingConfigService;
 	private final DtoAndMapperWriter dtoAndMapperWriter;
 	private final RepositoryWriter repositoryWriter;
-	private final PageDtoWriter pageDtoWriter;
+	private final PageObjectWriter pageObjectWriter;
 	private final ServiceWriter serviceWriter;
 	private final ControllerWriter controllerWriter;
 	private final ResourceMapperWriter resourceMapperWriter;
 	private final ResourceWriter resourceWriter;
 
 
-	public void writeEntityFiles(String entityPackage, String dtoPackage, String mapperPackage,
-			String repositoryPackage, String servicesPackage,String controllerPackages,String resourcesPackage,String resourceMappersPackage, Path rootPath, EntityModel model,
+	public void writeEntityFiles(Path rootPath, EntityModel model,
 			List<EntityModel> allModels, String dbProduct, FkMode fkMode, RelationFetch relationFetch,
 			boolean generateDto, boolean generateRepositories, boolean generateServices,boolean generateControllers, DatabaseMetaData md)
 			throws IOException {
@@ -91,14 +92,14 @@ public class EntityFilesWriter {
 
 		// composite PK -> add @EmbeddedId + generate Id class
 		if (compositePk) {
-			ClassName idClass = ClassName.get(entityPackage, idClassName);
+			ClassName idClass = ClassName.get(SwordWizard.ENTITY_PKG, idClassName);
 			FieldSpec.Builder idField = FieldSpec.builder(idClass, "id", Modifier.PRIVATE)
 					.addAnnotation(ClassName.get("jakarta.persistence", "EmbeddedId"))
 					.addAnnotation(ClassName.get("lombok", "ToString").nestedClass("Include"))
 					.addAnnotation(ClassName.get("lombok", "EqualsAndHashCode").nestedClass("Include"));
 			entity.addField(idField.build());
 
-			writeEmbeddedId(entityPackage, rootPath, idClassName, model, dbProduct, generatedAnn);
+			writeEmbeddedId(SwordWizard.ENTITY_PKG, rootPath, idClassName, model, dbProduct, generatedAnn);
 
 			idTypeForRepository = idClass;
 		}
@@ -114,9 +115,9 @@ public class EntityFilesWriter {
 					continue;
 
 				String targetEntityName = namingConfigService.resolveEntityName(fk.targetTable());
-				ClassName targetType = ClassName.get(entityPackage, targetEntityName);
-				String relFieldName = lowerFirst(targetEntityName);
-
+				ClassName targetType = ClassName.get(SwordWizard.ENTITY_PKG, targetEntityName);
+				
+				String relFieldName = lowerFirst(NamingUtils.toFieldName(fk.localColumn()));
 				boolean unique = isColumnUnique(md, model.catalog(), model.schema(), model.table(), localCol);
 
 				AnnotationSpec.Builder relationAnn = AnnotationSpec
@@ -231,7 +232,7 @@ public class EntityFilesWriter {
 
 		// inverse relations on parent side
 		if (fkMode == FkMode.RELATION) {
-			List<FieldSpec> inverseFields = buildInverseRelationFields(model, allModels, entityPackage, md,
+			List<FieldSpec> inverseFields = buildInverseRelationFields(model, allModels, SwordWizard.ENTITY_PKG, md,
 					relationFetch);
 			for (FieldSpec invField : inverseFields) {
 				entity.addField(invField);
@@ -239,32 +240,32 @@ public class EntityFilesWriter {
 		}
 
 		// write entity
-		JavaFile.builder(entityPackage, entity.build()).build().writeTo(rootPath);
+		JavaFile.builder(SwordWizard.ENTITY_PKG, entity.build()).build().writeTo(rootPath);
 
 		// DTO + Mapper
 		if (generateDto) {
-			this.dtoAndMapperWriter.writeDtoAndMapper(entityPackage, dtoPackage, mapperPackage, rootPath, model,
+			this.dtoAndMapperWriter.writeDtoAndMapper(rootPath, model,
 					dbProduct, entitySimpleName, generatedAnn);
 		}
 
 		// Repository
 		if (generateRepositories) {
-			repositoryWriter.writeRepository(repositoryPackage, entityPackage, rootPath, entitySimpleName,
+			repositoryWriter.writeRepository(rootPath, entitySimpleName,
 					idTypeForRepository, scalarFieldInfos, generatedAnn);
 		}
 
 		// Service
 		if (generateServices) {
 			// We assume that DTO, Mapper and Repository are also generated/available.
-			this.pageDtoWriter.writePageDtoOnce(servicesPackage, rootPath, generatedAnn);
-			this.serviceWriter.writeService(servicesPackage, entityPackage, dtoPackage, mapperPackage,
-					repositoryPackage, rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
+			this.pageObjectWriter.writePageObjectOnce(PageObjectWriter.PageType.DTO, rootPath, generatedAnn);
+			this.serviceWriter.writeService(rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
 		}
 		
 		if (generateControllers) {
-			this.controllerWriter.writeController(controllerPackages, servicesPackage, resourcesPackage, resourceMappersPackage, rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
-			this.resourceWriter.writeResource(resourcesPackage, rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
-			this.resourceMapperWriter.writeResourceMapper(resourceMappersPackage, dtoPackage, resourcesPackage, rootPath, entitySimpleName, generatedAnn);
+			this.pageObjectWriter.writePageObjectOnce(PageObjectWriter.PageType.RESOURCE, rootPath, generatedAnn);
+			this.controllerWriter.writeController(rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
+			this.resourceWriter.writeResource(rootPath, entitySimpleName, idTypeForRepository, scalarFieldInfos, generatedAnn);
+			this.resourceMapperWriter.writeResourceMapper(rootPath, entitySimpleName, generatedAnn);
 		}
 	}
 

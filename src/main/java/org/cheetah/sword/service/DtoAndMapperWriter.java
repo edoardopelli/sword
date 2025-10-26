@@ -8,6 +8,7 @@ import javax.lang.model.element.Modifier;
 import org.cheetah.sword.service.records.ColumnModel;
 import org.cheetah.sword.service.records.EntityModel;
 import org.cheetah.sword.util.SqlTypeMapper;
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
@@ -30,7 +31,7 @@ public class DtoAndMapperWriter {
 
 	private final NamingConfigService namingConfigService;
 
-	public void writeDtoAndMapper(String entityPackage, String dtoPackage, String mapperPackage, Path rootPath,
+	public void writeDtoAndMapper(Path rootPath,
 			EntityModel model, String dbProduct, String entitySimpleName, AnnotationSpec generatedAnn)
 			throws IOException {
 
@@ -58,22 +59,22 @@ public class DtoAndMapperWriter {
 			dto.addField(f.build());
 		}
 
-		JavaFile.builder(dtoPackage, dto.build()).build().writeTo(rootPath);
+		JavaFile.builder(SwordWizard.DTO_PKG, dto.build()).build().writeTo(rootPath);
 
 		AnnotationSpec mapperAnn = AnnotationSpec.builder(ClassName.get("org.mapstruct", "Mapper"))
 				.addMember("componentModel", "$S", "spring").build();
 
 		MethodSpec toDto = MethodSpec.methodBuilder("toDto").addModifiers(Modifier.PUBLIC, Modifier.ABSTRACT)
-				.returns(ClassName.get(dtoPackage, dtoSimpleName))
-				.addParameter(ClassName.get(entityPackage, entitySimpleName), "entity").build();
+				.returns(ClassName.get(SwordWizard.DTO_PKG, dtoSimpleName))
+				.addParameter(ClassName.get(SwordWizard.ENTITY_PKG, entitySimpleName), "entity").build();
 
 		MethodSpec toEntity = MethodSpec.methodBuilder("toEntity").addModifiers(Modifier.PUBLIC, Modifier.ABSTRACT)
-				.returns(ClassName.get(entityPackage, entitySimpleName))
-				.addParameter(ClassName.get(dtoPackage, dtoSimpleName), "dto").build();
+				.returns(ClassName.get(SwordWizard.ENTITY_PKG, entitySimpleName))
+				.addParameter(ClassName.get(SwordWizard.DTO_PKG, dtoSimpleName), "dto").build();
 
 		TypeSpec mapper = TypeSpec.interfaceBuilder(entitySimpleName + "Mapper").addModifiers(Modifier.PUBLIC)
 				.addAnnotation(mapperAnn).addAnnotation(generatedAnn).addMethod(toDto).addMethod(toEntity).build();
 
-		JavaFile.builder(mapperPackage, mapper).build().writeTo(rootPath);
+		JavaFile.builder(SwordWizard.MAPPER_PKG, mapper).build().writeTo(rootPath);
 	}
 }

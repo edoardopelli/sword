@@ -7,6 +7,8 @@ import java.util.List;
 import javax.lang.model.element.Modifier;
 
 import org.cheetah.sword.service.records.ScalarFieldInfo;
+import org.cheetah.sword.util.NamingUtils;
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
@@ -32,7 +34,7 @@ public class ControllerWriter {
      * Writes the REST controller source for the given entity.
      *
      * @param controllersPackage Target package for controllers (e.g. "<base>.web.rest").
-     * @param servicesPackage    Package of services (e.g. "<base>.service").
+     * @param SwordWizard.SERVICE_PKG    Package of services (e.g. "<base>.service").
      * @param resourcesPackage   Package of resource POJOs (e.g. "<base>.web.resource").
      * @param mappersPackage     Package of web mappers (e.g. "<base>.web.mapper").
      * @param rootPath           Root output path for sources.
@@ -41,10 +43,7 @@ public class ControllerWriter {
      * @param scalarFieldInfos   Scalar fields of the entity (name + TypeName).
      * @param generatedAnn       @Generated annotation to apply on the type.
      */
-    public void writeController(String controllersPackage,
-                                String servicesPackage,
-                                String resourcesPackage,
-                                String mappersPackage,
+    public void writeController(
                                 Path rootPath,
                                 String entitySimpleName,
                                 TypeName idType,
@@ -52,57 +51,79 @@ public class ControllerWriter {
                                 AnnotationSpec generatedAnn) throws IOException {
 
         // Naming policy: <Entity>Resource as controller name (package distinguishes it from the Resource POJO).
-        String controllerName     = entitySimpleName + "Controller";
-        String serviceName        = entitySimpleName + "Service";
-        String resourceClassName  = entitySimpleName + "Resource";
-        String resourceMapperName = entitySimpleName + "ResourceMapper";
+        String controllerSimpleName     = NamingUtils.pluralizeSimpleName(entitySimpleName) + "Controller";
+        String serviceSimpleName        = NamingUtils.pluralizeSimpleName(entitySimpleName) + "Service";
+        System.out.println("ControllerName: "+ controllerSimpleName);
+        System.out.println("\tServiceName: "+ serviceSimpleName);
+        String resourceSimpleName       = entitySimpleName + "Resource";
+        String resourceMapperSimpleName = entitySimpleName + "ResourceMapper";
+        String dtoSimpleName            = entitySimpleName + "Dto";
 
         // Common type handles
-        ClassName responseEntity = ClassName.get("org.springframework.http", "ResponseEntity");
-        ClassName list           = ClassName.get("java.util", "List");
-        ClassName mediaType      = ClassName.get("org.springframework.http", "MediaType");
+        ClassName responseEntityClass   = ClassName.get("org.springframework.http", "ResponseEntity");
+        ClassName pageDtoClass          = ClassName.get(SwordWizard.DTO_PKG, "PageDto");
+        ClassName pageResourceClass     = ClassName.get(SwordWizard.RESOURCES_PKG, "PageResource");
 
-        ClassName serviceType    = ClassName.get(servicesPackage,   serviceName);
-        ClassName resourceType   = ClassName.get(resourcesPackage,  resourceClassName);
-        ClassName mapperType     = ClassName.get(mappersPackage,    resourceMapperName);
+        ClassName mediaTypeClass        = ClassName.get("org.springframework.http", "MediaType");
 
-        TypeName listOfResource      = ParameterizedTypeName.get(list, resourceType);
-        TypeName responseEntityList  = ParameterizedTypeName.get(responseEntity, listOfResource);
-        TypeName responseEntityOne   = ParameterizedTypeName.get(responseEntity, resourceType);
-        TypeName responseEntityVoid  = ParameterizedTypeName.get(responseEntity, ClassName.get(Void.class));
+        ClassName serviceClass          = ClassName.get(SwordWizard.SERVICE_PKG,   serviceSimpleName);
+        ClassName resourceClass         = ClassName.get(SwordWizard.RESOURCES_PKG, resourceSimpleName);
+        ClassName dtoClass              = ClassName.get(SwordWizard.DTO_PKG,       dtoSimpleName);
+        ClassName resourceMapperClass   = ClassName.get(SwordWizard.RESOURCE_MAPPERS_PKG, resourceMapperSimpleName);
+        ClassName pageResourceRawClass  = ClassName.get(SwordWizard.RESOURCES_PKG, "PageResource");
+
+        ClassName listRawClass          = ClassName.get("java.util", "List");
+
+        TypeName resourceListType               = ParameterizedTypeName.get(listRawClass, resourceClass);
+        TypeName pageResourceOfResourceType     = ParameterizedTypeName.get(pageResourceRawClass, resourceClass);
+        TypeName pageDtoOfDtoType               = ParameterizedTypeName.get(pageDtoClass, dtoClass);
+        TypeName responseEntityOfResourceList   = ParameterizedTypeName.get(responseEntityClass, resourceListType);
+        TypeName responseEntityOfPageResource   = ParameterizedTypeName.get(responseEntityClass, pageResourceOfResourceType);
+        TypeName responseEntityOfResource       = ParameterizedTypeName.get(responseEntityClass, resourceClass);
+        TypeName responseEntityOfVoid           = ParameterizedTypeName.get(responseEntityClass, ClassName.get(Void.class));
 
         // @RestController, @RequestMapping
-        AnnotationSpec restController = AnnotationSpec.builder(
+        AnnotationSpec restControllerAnnotation = AnnotationSpec.builder(
                 ClassName.get("org.springframework.web.bind.annotation", "RestController")).build();
 
-        AnnotationSpec reqMapping = AnnotationSpec.builder(
+        AnnotationSpec requestMappingAnnotation = AnnotationSpec.builder(
                 ClassName.get("org.springframework.web.bind.annotation", "RequestMapping"))
             .addMember("value", "$S", "/" + entitySimpleName.toLowerCase(java.util.Locale.ROOT))
             .build();
 
         // Fields
-        com.squareup.javapoet.FieldSpec serviceField =
-            com.squareup.javapoet.FieldSpec.builder(serviceType, "service", Modifier.PRIVATE, Modifier.FINAL).build();
-        com.squareup.javapoet.FieldSpec mapperField  =
-            com.squareup.javapoet.FieldSpec.builder(mapperType, "mapper",  Modifier.PRIVATE, Modifier.FINAL).build();
+        com.squareup.javapoet.FieldSpec serviceFieldSpec =
+            com.squareup.javapoet.FieldSpec.builder(serviceClass, "service", Modifier.PRIVATE, Modifier.FINAL).build();
+        com.squareup.javapoet.FieldSpec mapperFieldSpec  =
+            com.squareup.javapoet.FieldSpec.builder(resourceMapperClass, "mapper",  Modifier.PRIVATE, Modifier.FINAL).build();
 
         // Ctor
-        MethodSpec ctor = MethodSpec.constructorBuilder()
+        MethodSpec constructor = MethodSpec.constructorBuilder()
             .addModifiers(Modifier.PUBLIC)
-            .addParameter(serviceType, "service")
-            .addParameter(mapperType,  "mapper")
+            .addParameter(serviceClass, "service")
+            .addParameter(resourceMapperClass,  "mapper")
             .addStatement("this.service = service")
             .addStatement("this.mapper = mapper")
             .build();
 
         // --- Parameters (annotated) ---
-        ParameterSpec pathVarIdParam = ParameterSpec.builder(idType, "id")
+        ParameterSpec idPathVariableParam = ParameterSpec.builder(idType, "id")
             .addAnnotation(ClassName.get("org.springframework.web.bind.annotation", "PathVariable"))
             .build();
 
-        ParameterSpec requestBodyParam = ParameterSpec.builder(resourceType, "body")
+        ParameterSpec resourceRequestBodyParam = ParameterSpec.builder(resourceClass, "body")
             .addAnnotation(ClassName.get("org.springframework.web.bind.annotation", "RequestBody"))
             .build();
+
+        ParameterSpec pageNumberRequestParam = ParameterSpec.builder(TypeName.INT, "pageNumber")
+                .addAnnotation(ClassName.get("org.springframework.web.bind.annotation","RequestParam"))
+                .build();
+
+        ParameterSpec pageSizeRequestParam = ParameterSpec.builder(TypeName.INT, "pageSize")
+                .addAnnotation(ClassName.get("org.springframework.web.bind.annotation","RequestParam"))
+                .build();
+
+        ParameterSpec pageDtoParamSpec = ParameterSpec.builder(pageDtoOfDtoType, "pageDto").build();
 
         // --- CRUD endpoints ---
 
@@ -110,31 +131,51 @@ public class ControllerWriter {
             .addJavadoc("Returns the full list of resources.\n")
             .addModifiers(Modifier.PUBLIC)
             .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "GetMapping"))
-                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaType).build())
-            .returns(responseEntityList)
-            .addStatement("return $T.ok(mapper.toResourceList(service.findAll()))", responseEntity)
+                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaTypeClass).build())
+            .returns(responseEntityOfPageResource)
+            .addParameter(pageNumberRequestParam)
+            .addParameter(pageSizeRequestParam)
+            .addStatement("$T pageDto = service.findAll(pageNumber,pageSize)", pageDtoOfDtoType)
+            .addStatement("$T pageResource = toPageResource(pageDto)", pageResourceOfResourceType)
+            .addStatement("return $T.ok(pageResource)", responseEntityClass)
             .build();
 
+        MethodSpec toPageResourceMethod = MethodSpec.methodBuilder("toPageResource")
+                .addJavadoc("Transforms a PageDto in a PageResource")
+                .addModifiers(Modifier.PRIVATE)
+                .returns(pageResourceOfResourceType)
+                .addParameter(pageDtoParamSpec)
+                .addStatement("$T content = pageDto.getContent().stream().map(mapper::toResource).toList()", resourceListType)
+                .addStatement("return $T.<$T>builder().content(content).pageNumber(pageDto.getPageNumber()).pageSize(pageDto.getPageSize()).totalElements(pageDto.getTotalElements()).totalPages(pageDto.getTotalPages()).build()", pageResourceClass, resourceClass)
+                .build();
+
+        /*
+         * 
+         * 
+         *     List<AddressDto> dtoList = page.getContent().stream().map(mapper::toDto).toList();
+         *     return PageDto.<AddressDto>builder().content(dtoList).pageNumber(page.getNumber()).pageSize(page.getSize()).totalElements(page.getTotalElements()).totalPages(page.getTotalPages()).build();
+         *
+         */
         MethodSpec getById = MethodSpec.methodBuilder("getById")
             .addJavadoc("Returns one resource by id.\n")
             .addModifiers(Modifier.PUBLIC)
             .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "GetMapping"))
                 .addMember("value", "$S", "/{id}")
-                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaType).build())
-            .addParameter(pathVarIdParam)
-            .returns(responseEntityOne)
-            .addStatement("return $T.ok(mapper.toResource(service.findById(id)))", responseEntity)
+                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaTypeClass).build())
+            .addParameter(idPathVariableParam)
+            .returns(responseEntityOfResource)
+            .addStatement("return $T.ok(mapper.toResource(service.findById(id)))", responseEntityClass)
             .build();
 
         MethodSpec create = MethodSpec.methodBuilder("create")
             .addJavadoc("Creates and returns the persisted resource.\n")
             .addModifiers(Modifier.PUBLIC)
             .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "PostMapping"))
-                .addMember("consumes", "$T.APPLICATION_JSON_VALUE", mediaType)
-                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaType).build())
-            .addParameter(requestBodyParam)
-            .returns(responseEntityOne)
-            .addStatement("return $T.ok(mapper.toResource(service.create(mapper.toDto(body))))", responseEntity)
+                .addMember("consumes", "$T.APPLICATION_JSON_VALUE", mediaTypeClass)
+                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaTypeClass).build())
+            .addParameter(resourceRequestBodyParam)
+            .returns(responseEntityOfResource)
+            .addStatement("return $T.ok(mapper.toResource(service.save(mapper.toDto(body))))", responseEntityClass)
             .build();
 
         MethodSpec update = MethodSpec.methodBuilder("update")
@@ -142,12 +183,12 @@ public class ControllerWriter {
             .addModifiers(Modifier.PUBLIC)
             .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "PutMapping"))
                 .addMember("value", "$S", "/{id}")
-                .addMember("consumes", "$T.APPLICATION_JSON_VALUE", mediaType)
-                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaType).build())
-            .addParameter(pathVarIdParam)
-            .addParameter(requestBodyParam)
-            .returns(responseEntityOne)
-            .addStatement("return $T.ok(mapper.toResource(service.update(id, mapper.toDto(body))))", responseEntity)
+                .addMember("consumes", "$T.APPLICATION_JSON_VALUE", mediaTypeClass)
+                .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaTypeClass).build())
+            .addParameter(idPathVariableParam)
+            .addParameter(resourceRequestBodyParam)
+            .returns(responseEntityOfResource)
+            .addStatement("return $T.ok(mapper.toResource(service.update(id, mapper.toDto(body))))", responseEntityClass)
             .build();
 
         MethodSpec delete = MethodSpec.methodBuilder("delete")
@@ -155,56 +196,59 @@ public class ControllerWriter {
             .addModifiers(Modifier.PUBLIC)
             .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "DeleteMapping"))
                 .addMember("value", "$S", "/{id}").build())
-            .addParameter(pathVarIdParam)
-            .returns(responseEntityVoid)
+            .addParameter(idPathVariableParam)
+            .returns(responseEntityOfVoid)
             .addStatement("service.delete(id)")
-            .addStatement("return $T.noContent().build()", responseEntity)
+            .addStatement("return $T.noContent().build()", responseEntityClass)
             .build();
 
         // --- Controller type builder ---
-        TypeSpec.Builder type = TypeSpec.classBuilder(controllerName)
+        TypeSpec.Builder controllerTypeBuilder = TypeSpec.classBuilder(controllerSimpleName)
             .addModifiers(Modifier.PUBLIC)
-            .addAnnotation(restController)
-            .addAnnotation(reqMapping)
+            .addAnnotation(restControllerAnnotation)
+            .addAnnotation(requestMappingAnnotation)
             .addAnnotation(generatedAnn)
-            .addField(serviceField)
-            .addField(mapperField)
-            .addMethod(ctor)
+            .addField(serviceFieldSpec)
+            .addField(mapperFieldSpec)
+            .addMethod(constructor)
             .addMethod(getAll)
             .addMethod(getById)
             .addMethod(create)
             .addMethod(update)
-            .addMethod(delete);
+            .addMethod(delete)
+            .addMethod(toPageResourceMethod);
 
         // --- findBy<Field> endpoints for each scalar field ---
-        for (ScalarFieldInfo f : scalarFieldInfos) {
+        for (ScalarFieldInfo fieldInfo : scalarFieldInfos) {
             // Skip id because it's already exposed by the "/{id}" endpoint
-            if ("id".equals(f.javaFieldName())) continue;
+            if ("id".equals(fieldInfo.javaFieldName())) continue;
 
-            String field = f.javaFieldName();
-            String cap   = Character.toUpperCase(field.charAt(0)) + field.substring(1);
+            String fieldName = fieldInfo.javaFieldName();
+            String capitalizedFieldName = Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
 
             // @RequestParam <Type> <field>
-            ParameterSpec reqParam = ParameterSpec.builder(f.javaType(), field)
+            ParameterSpec requestParamForField = ParameterSpec.builder(fieldInfo.javaType(), fieldName)
                 .addAnnotation(ClassName.get("org.springframework.web.bind.annotation", "RequestParam"))
                 .build();
 
-            MethodSpec findBy = MethodSpec.methodBuilder("findBy" + cap)
-                .addJavadoc("Returns resources filtered by {@code $L}.\n", field)
+            MethodSpec findByMethodSpec = MethodSpec.methodBuilder("findBy" + capitalizedFieldName)
+                .addJavadoc("Returns resources filtered by {@code $L}.\n", fieldName)
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(AnnotationSpec.builder(ClassName.get("org.springframework.web.bind.annotation", "GetMapping"))
-                    .addMember("value", "$S", "/by-" + field)
-                    .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaType).build())
-                .addParameter(reqParam)
-                .returns(responseEntityList)
-                // service.findBy<Field>(param) → List<DTO> → mapper.toResourceList(...)
-                .addStatement("return $T.ok(mapper.toResourceList(service.findBy$L($L)))",
-                        responseEntity, cap, field)
+                    .addMember("value", "$S", "/by-" + fieldName)
+                    .addMember("produces", "$T.APPLICATION_JSON_VALUE", mediaTypeClass).build())
+                .addParameter(requestParamForField)
+                .addParameter(pageNumberRequestParam)
+                .addParameter(pageSizeRequestParam)
+                .returns(responseEntityOfPageResource)
+                .addStatement("$T pageDto = service.findBy$L($L, pageNumber,pageSize)", pageDtoOfDtoType,capitalizedFieldName, fieldName)
+                .addStatement("$T pageResource = toPageResource(pageDto)", pageResourceOfResourceType)
+                .addStatement("return $T.ok(pageResource)", responseEntityClass)
                 .build();
 
-            type.addMethod(findBy);
+            controllerTypeBuilder.addMethod(findByMethodSpec);
         }
 
-        JavaFile.builder(controllersPackage, type.build()).build().writeTo(rootPath);
+        JavaFile.builder(SwordWizard.CONTROLLER_PKG, controllerTypeBuilder.build()).build().writeTo(rootPath);
     }
 }

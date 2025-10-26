@@ -22,6 +22,7 @@ import org.cheetah.sword.service.records.ColumnModel;
 import org.cheetah.sword.service.records.EntityModel;
 import org.cheetah.sword.service.records.ImportedFkRow;
 import org.cheetah.sword.service.records.SimpleFkModel;
+import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -44,7 +45,7 @@ public class GenerationService {
 
 	private final EntityFilesWriter entityFilesWriter;
 	private final RepositoryWriter repositoryWriter;
-	private final PageDtoWriter pageDtoWriter;
+	private final PageObjectWriter pageDtoWriter;
 	private final ServiceWriter serviceWriter;
 
 	@EventListener(GenerateRequestedEvent.class)
@@ -61,14 +62,14 @@ public class GenerationService {
 			List<String> tables = metadataService.listTables(connection, catalog, schema);
 			System.out.printf("   Found %d table(s).%n", tables.size());
 
-			String entityPackage = normalizePackage(cfg.getBasePackage());
-			String dtoPackage = siblingPackage(entityPackage, "dtos");
-			String mapperPackage = siblingPackage(entityPackage, "mappers");
-			String repositoryPackage = siblingPackage(entityPackage, "repositories");
-			String servicesPackage = siblingPackage(entityPackage, "services");
-			String controllersPackage = siblingPackage(entityPackage, "controllers");
-			String resourcesPackage = siblingPackage(entityPackage, "resources");
-			String resourcesMapperPackage = siblingPackage(entityPackage, "resourceMappers");
+			String entityPackage = SwordWizard.BASE_PACKAGE;
+			String dtoPackage = SwordWizard.DTO_PKG;
+			String mapperPackage = SwordWizard.MAPPER_PKG;
+			String repositoryPackage = SwordWizard.REPOSITORY_PKG;
+			String servicesPackage = SwordWizard.SERVICE_PKG;
+			String controllersPackage = SwordWizard.CONTROLLER_PKG;
+			String resourcesPackage = SwordWizard.RESOURCES_PKG;
+			String resourcesMapperPackage = SwordWizard.RESOURCE_MAPPERS_PKG;
 
 			Path rootPath = cfg.getOutputPath();
 			Files.createDirectories(rootPath);
@@ -97,8 +98,7 @@ public class GenerationService {
 
 			// per-table generation
 			for (EntityModel model : models) {
-				entityFilesWriter.writeEntityFiles(entityPackage, dtoPackage, mapperPackage, repositoryPackage,
-						servicesPackage,controllersPackage,resourcesPackage,resourcesMapperPackage, rootPath, model, models, dbProduct, cfg.getFkMode(), cfg.getRelationFetch(),
+				entityFilesWriter.writeEntityFiles(rootPath, model, models, dbProduct, cfg.getFkMode(), cfg.getRelationFetch(),
 						cfg.isGenerateDto(), cfg.isGenerateRepositories(), cfg.isGenerateServices(),cfg.isGenerateControllers(), metaData);
 				generated++;
 			}
@@ -195,29 +195,5 @@ public class GenerationService {
 		return s == null ? "(null)" : s;
 	}
 
-	private static String normalizePackage(String raw) {
-		if (raw == null)
-			return "";
-		String p = raw.replace('/', '.').replace('\\', '.').trim();
-		while (p.contains("..")) {
-			p = p.replace("..", ".");
-		}
-		if (p.startsWith("."))
-			p = p.substring(1);
-		if (p.endsWith("."))
-			p = p.substring(0, p.length() - 1);
-		return p;
-	}
 
-	private static String siblingPackage(String entityPackage, String name) {
-		if (entityPackage == null || entityPackage.isBlank()) {
-			return name;
-		}
-		int idx = entityPackage.lastIndexOf('.');
-		if (idx <= 0) {
-			return name;
-		}
-		String parent = entityPackage.substring(0, idx);
-		return parent + "." + name;
-	}
 }

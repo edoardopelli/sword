@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
-import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 /**
@@ -48,10 +47,13 @@ public class ConnectionConfig {
 	private String catalog;
 	private String schema;
 
-	private String basePackage;
+//	private String basePackage;
 	private Path outputPath;
 
+	@Builder.Default
 	private FkMode fkMode = FkMode.SCALAR;
+
+	@Builder.Default
 	private RelationFetch relationFetch = RelationFetch.LAZY;
 
 	@Builder.Default
@@ -65,7 +67,6 @@ public class ConnectionConfig {
 	
 	@Builder.Default
 	private boolean generateControllers = false;
-	
 	
 
 }
