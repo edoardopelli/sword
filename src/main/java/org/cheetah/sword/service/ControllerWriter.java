@@ -53,8 +53,6 @@ public class ControllerWriter {
         // Naming policy: <Entity>Resource as controller name (package distinguishes it from the Resource POJO).
         String controllerSimpleName     = NamingUtils.pluralizeSimpleName(entitySimpleName) + "Controller";
         String serviceSimpleName        = NamingUtils.pluralizeSimpleName(entitySimpleName) + "Service";
-        System.out.println("ControllerName: "+ controllerSimpleName);
-        System.out.println("\tServiceName: "+ serviceSimpleName);
         String resourceSimpleName       = entitySimpleName + "Resource";
         String resourceMapperSimpleName = entitySimpleName + "ResourceMapper";
         String dtoSimpleName            = entitySimpleName + "Dto";

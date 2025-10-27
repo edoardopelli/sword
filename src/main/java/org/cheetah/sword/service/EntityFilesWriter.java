@@ -7,9 +7,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -244,8 +247,29 @@ public class EntityFilesWriter {
 
 		// DTO + Mapper
 		if (generateDto) {
-			this.dtoAndMapperWriter.writeDtoAndMapper(rootPath, model,
-					dbProduct, entitySimpleName, generatedAnn);
+			// Costruisci mappa FK: localColumn -> fkModel
+			Map<String, SimpleFkModel> fkByLocalColumn = new LinkedHashMap<>();
+			for (SimpleFkModel fk : model.simpleFks()) {
+			    // consideriamo solo FK single-column (sono già le uniche presenti in simpleFks)
+			    fkByLocalColumn.put(fk.localColumn(), fk);
+			}
+
+			// Colonne PK embedded (in caso di composite pk)
+			Set<String> embeddedPkColumns = model.pkCols().size() > 1
+			        ? model.pkCols()
+			        : Collections.emptySet();
+
+			// Genera DTO + Mapper con logica FK aggiornata
+			dtoAndMapperWriter.writeDtoAndMapper(
+			        rootPath,
+			        model,
+			        dbProduct,
+			        entitySimpleName,
+			        generatedAnn,
+			        fkMode,
+			        fkByLocalColumn,
+			        embeddedPkColumns
+			);
 		}
 
 		// Repository
