@@ -1,98 +1,174 @@
 package org.cheetah.sword.service;
 
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+import org.cheetah.sword.config.YamlConfigService;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.stereotype.Service;
 import org.yaml.snakeyaml.Yaml;
 
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.*;
-
 /**
  * Provides resolution of Java entity class names (for tables) and Java field names (for columns).
  *
- * Precedence:
- * 1. If a YAML override is provided at runtime with --naming-file=... or --namingFile=...,
- *    those overrides are applied first.
- * 2. Otherwise, names are derived automatically.
+ * Precedence (highest to lowest):
  *
- * YAML structure example:
+ * 1. Extended YAML config passed with --config-yml=...
+ *    This supports:
+ *      entities.<table>.entityName
+ *      entities.<table>.dtoName
+ *      entities.<table>.resourceName
+ *      entities.<table>.fields.<column>.propertyName
  *
- * tables:
- *   problems:
- *     entityName: Problem
- *     columns:
- *       problem_id: id
- *       problem_type: type
- *   incidents:
- *     entityName: Incident
- *     columns:
- *       incident_id: id
- *       INCIDENT_SEVERITY: severityLevel
- *   alarm_events:
- *     entityName: AlarmEvent
- *     columns:
- *       event_code: code
- *       event_timestamp: timestamp
+ * 2. Classic naming override file passed with --naming-file=... or --namingFile=...
+ *    This supports:
+ *      tables.<table>.entityName
+ *      tables.<table>.columns.<column> = <propertyName>
  *
- * Behavior:
- * - Tables not listed in YAML still get generated using default naming rules.
- * - Columns not listed in YAML still get generated using default naming rules.
+ * 3. Automatic derivation (CamelCase for entities, camelCase for fields).
+ *
+ * Notes:
+ * - Columns not listed in overrides still get generated using default naming rules.
+ * - Tables not listed in overrides still get generated.
  */
 @Service
 public class NamingConfigService {
 
     /**
-     * Holds table-level overrides from YAML.
+     * Classic overrides loaded from the legacy naming-file YAML.
      * Key: physical table name (lowercased).
-     * Value: override for entity simple name and per-column mappings.
+     * Value: override record (entityName + per-column mappings).
      */
     private final Map<String, TableOverride> tableOverrides = new HashMap<>();
 
     /**
-     * Creates the service and loads overrides (if any) from the YAML file
-     * specified via application arguments.
+     * Extended YAML config loader (may be "inactive" if no --config-yml provided).
+     */
+    private final YamlConfigService yamlConfigService;
+
+    /**
+     * Creates the service and loads overrides (if any) from:
+     * --config-yml=... (extended overrides)
+     * --naming-file=... / --namingFile=... (classic overrides)
      */
     public NamingConfigService(ApplicationArguments args) {
-        Path overridePath = resolveOverridePath(args);
-        if (overridePath != null) {
-            loadOverrides(overridePath);
+        Path extendedYamlPath = resolveExtendedYamlPath(args);
+        if (extendedYamlPath != null && Files.exists(extendedYamlPath)) {
+            this.yamlConfigService = new YamlConfigService(extendedYamlPath);
+        } else {
+            this.yamlConfigService = new YamlConfigService(null);
+        }
+
+        Path classicOverridePath = resolveOverridePath(args);
+        if (classicOverridePath != null) {
+            loadOverrides(classicOverridePath);
         } else {
             System.out.println("No naming override file provided (use --naming-file=... or --namingFile=...).");
         }
     }
 
+    /* ============================================================
+       Public API
+       ============================================================ */
+
     /**
      * Returns the entity simple class name for a given physical table name.
+     *
      * Precedence:
-     * 1. YAML override (tables.<table>.entityName)
-     * 2. Default derivation from the table name
+     * 1. Extended YAML: entities.<table>.entityName
+     * 2. Classic YAML:  tables.<table>.entityName
+     * 3. Default derivation from table name
      */
     public String resolveEntityName(String tableName) {
+        // 1. extended YAML
+        if (yamlConfigService != null && yamlConfigService.isActive()) {
+            var eo = yamlConfigService.getEntityOverride(tableName);
+            if (eo != null && eo.entityName != null && !eo.entityName.isBlank()) {
+                return eo.entityName;
+            }
+        }
+
+        // 2. classic YAML
         TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
         if (override != null && override.entityName() != null && !override.entityName().isBlank()) {
             return override.entityName();
         }
+
+        // 3. default
         return deriveEntityName(tableName);
     }
 
     /**
+     * Returns the DTO simple class name for a given table.
+     * If not overridden, fallback is <EntityName> + "Dto".
+     */
+    public String resolveDtoName(String tableName, String entitySimpleName) {
+        if (yamlConfigService != null && yamlConfigService.isActive()) {
+            var eo = yamlConfigService.getEntityOverride(tableName);
+            if (eo != null && eo.dtoName != null && !eo.dtoName.isBlank()) {
+                return eo.dtoName;
+            }
+        }
+        return entitySimpleName + "Dto";
+    }
+
+    /**
+     * Returns the Resource simple class name for a given table.
+     * If not overridden, fallback is <EntityName> + "Resource".
+     */
+    public String resolveResourceName(String tableName, String entitySimpleName) {
+        if (yamlConfigService != null && yamlConfigService.isActive()) {
+            var eo = yamlConfigService.getEntityOverride(tableName);
+            if (eo != null && eo.resourceName != null && !eo.resourceName.isBlank()) {
+                return eo.resourceName;
+            }
+        }
+        return entitySimpleName + "Resource";
+    }
+
+    /**
      * Returns the Java field/property name for a given physical column name.
+     *
      * Precedence:
-     * 1. YAML override (tables.<table>.columns.<column>)
-     * 2. Default camelCase derivation
+     * 1. Extended YAML: entities.<table>.fields.<column>.propertyName
+     * 2. Classic YAML : tables.<table>.columns.<column>
+     * 3. Default camelCase derivation
      */
     public String resolveColumnName(String tableName, String columnName) {
+        // 1. extended YAML
+        if (yamlConfigService != null && yamlConfigService.isActive()) {
+            var eo = yamlConfigService.getEntityOverride(tableName);
+            if (eo != null && eo.fields != null && eo.fields.containsKey(columnName)) {
+                var fo = eo.fields.get(columnName);
+                if (fo != null && fo.propertyName != null && !fo.propertyName.isBlank()) {
+                    return fo.propertyName;
+                }
+            }
+        }
+
+        // 2. classic YAML
         TableOverride override = tableOverrides.get(tableName.toLowerCase(Locale.ROOT));
         if (override != null && override.columns().containsKey(columnName)) {
             return override.columns().get(columnName);
         }
+
+        // 3. default
         return toPropertyName(columnName);
     }
 
+    /* ============================================================
+       Classic override file loading (your original logic)
+       ============================================================ */
+
     /**
-     * Resolves CLI argument for the naming override YAML file.
+     * Resolves CLI argument for the naming override YAML file (classic style).
      * Supports both --naming-file=... and --namingFile=...
      */
     private Path resolveOverridePath(ApplicationArguments args) {
@@ -118,8 +194,34 @@ public class NamingConfigService {
     }
 
     /**
-     * Loads table/column overrides from a YAML file.
+     * Resolves CLI argument for the extended YAML config file.
+     * Uses --config-yml=...
+     */
+    private Path resolveExtendedYamlPath(ApplicationArguments args) {
+        if (args.containsOption("config-yml")) {
+            List<String> values = args.getOptionValues("config-yml");
+            if (values != null && !values.isEmpty()) {
+                String pathCandidate = values.get(0);
+                if (pathCandidate != null && !pathCandidate.isBlank()) {
+                    return Path.of(pathCandidate.trim());
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Loads table/column overrides from the classic YAML file.
      * Safe to call even if file does not exist or is malformed (will fallback to defaults).
+     *
+     * Expected structure:
+     *
+     * tables:
+     *   problems:
+     *     entityName: Problem
+     *     columns:
+     *       problem_id: id
+     *       problem_type: type
      */
     @SuppressWarnings("unchecked")
     private void loadOverrides(Path path) {
@@ -168,6 +270,10 @@ public class NamingConfigService {
             System.err.println("Failed to load naming override file '" + path.toAbsolutePath() + "': " + e.getMessage());
         }
     }
+
+    /* ============================================================
+       Default naming logic (your original logic)
+       ============================================================ */
 
     /**
      * Derives an entity simple name from a physical table name.
@@ -304,6 +410,7 @@ public class NamingConfigService {
 
     /**
      * Splits a string on camelCase / PascalCase boundaries.
+     *
      * Example:
      *   "IncidentsMaintenance" -> ["Incidents","Maintenance"]
      *   "CUSTOMEROrders"       -> ["CUSTOMER","Orders"]
@@ -329,10 +436,9 @@ public class NamingConfigService {
             }
 
             char prev = arr[i - 1];
-
             boolean boundary = false;
 
-            // lower -> upper (e.g. tM)
+            // lower -> upper (tM)
             if (Character.isLowerCase(prev) && Character.isUpperCase(c)) {
                 boundary = true;
             }
@@ -342,10 +448,12 @@ public class NamingConfigService {
                 boundary = true;
             }
 
-            // UPPER followed by UPPER then lower (e.g. "PBSc" -> split before 'c')
+            // UPPER followed by UPPER then lower (PBS -> PB + SCode case)
             if (i < arr.length - 1) {
                 char next = arr[i + 1];
-                if (Character.isUpperCase(prev) && Character.isUpperCase(c) && Character.isLowerCase(next)) {
+                if (Character.isUpperCase(prev)
+                        && Character.isUpperCase(c)
+                        && Character.isLowerCase(next)) {
                     boundary = true;
                 }
             }
@@ -400,7 +508,7 @@ public class NamingConfigService {
             return w.substring(0, w.length() - 2);
         }
 
-        // generic plural: orders -> order, incidents -> incident
+        // generic plural: incidents -> incident, orders -> order
         if (lw.endsWith("s") && w.length() > 1) {
             return w.substring(0, w.length() - 1);
         }
@@ -423,9 +531,9 @@ public class NamingConfigService {
     }
 
     /**
-     * Holds naming overrides for a single table.
+     * Holds naming overrides for a single table from the classic (legacy) YAML.
      * entityName: desired entity class simple name
-     * columns: map: physical column name -> desired Java field name
+     * columns   : map physical column name -> desired Java field name
      */
     record TableOverride(String entityName, Map<String, String> columns) {}
 }

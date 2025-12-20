@@ -189,6 +189,10 @@ public class DtoAndMapperWriter {
         AnnotationSpec eqHashAnn = AnnotationSpec.builder(ClassName.get("lombok", "EqualsAndHashCode"))
                 .addMember("onlyExplicitlyIncluded", "$L", true)
                 .build();
+        
+        AnnotationSpec jsonIgnoreProperties = AnnotationSpec.builder(ClassName.get("com.fasterxml.jackson.annotation","JsonIgnoreProperties"))
+        		.addMember("ignoreUnknown","$L", true)
+        		.build();
 
         TypeSpec.Builder dto = TypeSpec.classBuilder(dtoSimpleName)
                 .addModifiers(Modifier.PUBLIC)
@@ -198,7 +202,8 @@ public class DtoAndMapperWriter {
                 .addAnnotation(ClassName.get("lombok", "Builder"))
                 .addAnnotation(toStringAnn)
                 .addAnnotation(eqHashAnn)
-                .addAnnotation(generatedAnn);
+                .addAnnotation(generatedAnn)
+                .addAnnotation(jsonIgnoreProperties);
 
         for (ColumnModel col : model.columns().values()) {
             String physicalName = col.name();

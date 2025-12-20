@@ -5,6 +5,8 @@ import java.nio.file.Path;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
+
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.Scanner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,6 +34,7 @@ import org.cheetah.sword.wizard.SwordWizard;
 import org.springframework.stereotype.Component;
 
 import com.squareup.javapoet.AnnotationSpec;
+import com.squareup.javapoet.ArrayTypeName;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
@@ -128,8 +132,15 @@ public class EntityFilesWriter {
 						.addMember("fetch", "$T.$L", ClassName.get("jakarta.persistence", "FetchType"),
 								relationFetch == RelationFetch.EAGER ? "EAGER" : "LAZY");
 
-				AnnotationSpec joinColAnn = AnnotationSpec.builder(ClassName.get("jakarta.persistence", "JoinColumn"))
-						.addMember("name", "$S", localCol).build();
+				String referencedColumnName = resolveReferencedColumnName(md, model, fk);
+
+				AnnotationSpec.Builder joinColBuilder = AnnotationSpec
+						.builder(ClassName.get("jakarta.persistence", "JoinColumn"))
+						.addMember("name", "$S", localCol);
+				if (referencedColumnName != null && !referencedColumnName.isBlank()) {
+					joinColBuilder.addMember("referencedColumnName", "$S", referencedColumnName);
+				}
+				AnnotationSpec joinColAnn = joinColBuilder.build();
 
 				FieldSpec.Builder relField = FieldSpec.builder(targetType, relFieldName, Modifier.PRIVATE)
 						.addAnnotation(relationAnn.build()).addAnnotation(joinColAnn);
@@ -149,7 +160,7 @@ public class EntityFilesWriter {
 				continue;
 
 			String fieldName = namingConfigService.resolveColumnName(model.table(), col.name());
-			TypeName javaType = SqlTypeMapper.map(col.dataType(), col.typeName(), col.nullable(), dbProduct);
+			TypeName javaType = resolveScalarJavaType(model, col, dbProduct);
 
 			FieldSpec.Builder field = FieldSpec.builder(javaType, fieldName, Modifier.PRIVATE);
 
@@ -315,7 +326,7 @@ public class EntityFilesWriter {
 			ColumnModel col = model.columns().get(pkCol);
 
 			String fieldName = namingConfigService.resolveColumnName(model.table(), pkCol);
-			TypeName javaType = SqlTypeMapper.map(col.dataType(), col.typeName(), col.nullable(), dbProduct);
+			TypeName javaType = resolveScalarJavaType(model, col, dbProduct);
 
 			FieldSpec f = FieldSpec.builder(javaType, fieldName, Modifier.PRIVATE)
 					.addAnnotation(AnnotationSpec.builder(ClassName.get("jakarta.persistence", "Column"))
@@ -471,4 +482,122 @@ public class EntityFilesWriter {
 		}
 		return simpleName + "s";
 	}
+
+
+	private String resolveReferencedColumnName(DatabaseMetaData md, EntityModel model, SimpleFkModel fk) {
+		if (md == null || model == null || fk == null) {
+			return null;
+		}
+		try (ResultSet rs = md.getImportedKeys(model.catalog(), model.schema(), model.table())) {
+			while (rs.next()) {
+				String fkColumnName = rs.getString("FKCOLUMN_NAME");
+				String pkTableName = rs.getString("PKTABLE_NAME");
+				if (fkColumnName == null || pkTableName == null) {
+					continue;
+				}
+				if (!fk.localColumn().equalsIgnoreCase(fkColumnName)) {
+					continue;
+				}
+				if (!fk.targetTable().equalsIgnoreCase(pkTableName)) {
+					continue;
+				}
+				return rs.getString("PKCOLUMN_NAME");
+			}
+		} catch (SQLException ignored) {
+			// Best-effort: if we cannot resolve it, we omit referencedColumnName.
+		}
+		return null;
+	}
+
+	private TypeName resolveScalarJavaType(EntityModel model, ColumnModel col, String dbProduct) {
+		if (col == null) {
+			return ClassName.get(Object.class);
+		}
+
+		String tn = col.typeName() == null ? "" : col.typeName().toLowerCase(Locale.ROOT);
+
+		// SQL Server Unicode strings.
+		if (tn.contains("nvarchar") || tn.contains("nchar") || tn.contains("ntext")) {
+			return ClassName.get(String.class);
+		}
+
+		// Floating types (avoid falling back to Object when SqlTypeMapper is incomplete).
+		if (tn.equals("float") || col.dataType() == Types.FLOAT || tn.equals("real") || col.dataType() == Types.REAL) {
+			return col.nullable() ? ClassName.get(Float.class) : TypeName.FLOAT;
+		}
+		if (tn.contains("double") || col.dataType() == Types.DOUBLE) {
+			return col.nullable() ? ClassName.get(Double.class) : TypeName.DOUBLE;
+		}
+
+		TypeName mapped = SqlTypeMapper.map(col.dataType(), col.typeName(), col.nullable(), dbProduct);
+		if (!isObjectType(mapped)) {
+			return mapped;
+		}
+
+		return promptUserForUnknownType(model, col, mapped);
+	}
+
+	private boolean isObjectType(TypeName typeName) {
+		if (!(typeName instanceof ClassName)) {
+			return false;
+		}
+		ClassName cn = (ClassName) typeName;
+		return "java.lang".equals(cn.packageName()) && "Object".equals(cn.simpleName());
+	}
+
+	private TypeName promptUserForUnknownType(EntityModel model, ColumnModel col, TypeName current) {
+		// In non-interactive contexts (CI, IDE run), do not block.
+		if (System.console() == null) {
+			System.out.println("[SWORD] WARNING: Cannot map column type. Defaulting to String. Column="
+					+ (model == null ? "<unknown>" : model.table()) + "." + col.name()
+					+ " dataType=" + col.dataType() + " typeName=" + col.typeName());
+			return ClassName.get(String.class);
+		}
+
+		String fullName = (model == null ? "<unknown_table>" : model.table()) + "." + col.name();
+		System.out.println("\n[SWORD] Column type mapping is unknown for: " + fullName);
+		System.out.println("        SQL dataType=" + col.dataType() + ", typeName=" + col.typeName()
+				+ ", nullable=" + col.nullable() + ", currentMapping=" + current);
+		System.out.println("        Select the Java type to generate:");
+		System.out.println("          1) String");
+		System.out.println("          2) Integer / int");
+		System.out.println("          3) Long / long");
+		System.out.println("          4) java.math.BigDecimal");
+		System.out.println("          5) Boolean / boolean");
+		System.out.println("          6) java.time.LocalDate");
+		System.out.println("          7) java.time.LocalDateTime");
+		System.out.println("          8) java.time.OffsetDateTime");
+		System.out.println("          9) byte[]");
+		System.out.println("         10) Float / float");
+		System.out.println("         11) Double / double");
+		System.out.print("        Enter a number (default=1): ");
+
+		Scanner scanner = new Scanner(System.in);
+		try {
+			String raw = scanner.nextLine();
+			int choice;
+			try {
+				choice = raw == null || raw.isBlank() ? 1 : Integer.parseInt(raw.trim());
+			} catch (NumberFormatException e) {
+				choice = 1;
+			}
+
+			return switch (choice) {
+				case 2 -> col.nullable() ? ClassName.get(Integer.class) : TypeName.INT;
+				case 3 -> col.nullable() ? ClassName.get(Long.class) : TypeName.LONG;
+				case 4 -> ClassName.get("java.math", "BigDecimal");
+				case 5 -> col.nullable() ? ClassName.get(Boolean.class) : TypeName.BOOLEAN;
+				case 6 -> ClassName.get("java.time", "LocalDate");
+				case 7 -> ClassName.get("java.time", "LocalDateTime");
+				case 8 -> ClassName.get("java.time", "OffsetDateTime");
+				case 9 -> ArrayTypeName.of(TypeName.BYTE);
+				case 10 -> col.nullable() ? ClassName.get(Float.class) : TypeName.FLOAT;
+				case 11 -> col.nullable() ? ClassName.get(Double.class) : TypeName.DOUBLE;
+				default -> ClassName.get(String.class);
+			};
+		} finally {
+			// Do not close System.in.
+		}
+	}
+
 }
