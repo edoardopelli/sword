@@ -1,9 +1,13 @@
 package org.cheetah.sword.generate.writers;
 
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
+import org.cheetah.sword.generate.NameResolver;
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.TableModel;
+import org.cheetah.sword.yaml.YamlSpec;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 import org.mapstruct.Mappings;
@@ -16,26 +20,36 @@ import com.squareup.javapoet.TypeSpec;
 
 public class DtoResourceMapperWriter {
 
-    public void write(Path outputDir, String basePackage, TableModel table) {
-        String mapperName = toPascalCase(table.getName()) + "ResourceMapper";
-        ClassName mapperType = ClassName.get(basePackage + ".mappers", mapperName);
+    public void write(Path outputDir, NameResolver resolver, TableModel table) {
+        String mapperName = resolver.resourceSimpleName(table) + "Mapper";
+        ClassName mapperType = ClassName.get(resolver.mappersPackage(), mapperName);
 
-        ClassName dtoType = ClassName.get(basePackage + ".dtos", toPascalCase(table.getName()) + "DTO");
-        ClassName resType = ClassName.get(basePackage + ".resources", toPascalCase(table.getName()) + "Resource");
+        ClassName dtoType = ClassName.get(resolver.dtosPackage(), resolver.dtoSimpleName(table));
+        ClassName resType = ClassName.get(resolver.resourcesPackage(), resolver.resourceSimpleName(table));
+
+        // Build resource field map: targetResourceField -> sourceDtoField
+        Map<String, String> resourceToDto = buildResourceToDtoFieldMap(resolver, table);
 
         AnnotationSpec.Builder mappingsToRes = AnnotationSpec.builder(Mappings.class);
         AnnotationSpec.Builder mappingsToDto = AnnotationSpec.builder(Mappings.class);
 
-        for (ColumnModel col : table.getColumns()) {
-            String field = toCamelCase(col.getName());
-            mappingsToRes.addMember("value", "$L", AnnotationSpec.builder(Mapping.class)
-                    .addMember("target", "$S", field)
-                    .addMember("source", "$S", field)
-                    .build());
-            mappingsToDto.addMember("value", "$L", AnnotationSpec.builder(Mapping.class)
-                    .addMember("target", "$S", field)
-                    .addMember("source", "$S", field)
-                    .build());
+        // toResource: target=resourceField, source=dtoField
+        for (Map.Entry<String, String> e : resourceToDto.entrySet()) {
+            mappingsToRes.addMember("value", "$L",
+                    AnnotationSpec.builder(Mapping.class)
+                            .addMember("target", "$S", e.getKey())
+                            .addMember("source", "$S", e.getValue())
+                            .build());
+        }
+
+        // toDto: target=dtoField, source=resourceField (reverse)
+        // Use the same pairs reversed to keep explicit mappings (rename-safe).
+        for (Map.Entry<String, String> e : resourceToDto.entrySet()) {
+            mappingsToDto.addMember("value", "$L",
+                    AnnotationSpec.builder(Mapping.class)
+                            .addMember("target", "$S", e.getValue())
+                            .addMember("source", "$S", e.getKey())
+                            .build());
         }
 
         MethodSpec toResource = MethodSpec.methodBuilder("toResource")
@@ -72,33 +86,35 @@ public class DtoResourceMapperWriter {
         }
     }
 
-    private static String toPascalCase(String s) {
-        String[] parts = s.toLowerCase().split("[^a-z0-9]+");
-        if (parts.length == 0) {
-            return s;
+    private Map<String, String> buildResourceToDtoFieldMap(NameResolver resolver, TableModel table) {
+        // Default: 1:1 mapping based on DTO field names.
+        Map<String, String> resourceToDto = new LinkedHashMap<>();
+        for (ColumnModel col : table.getColumns()) {
+            String dtoField = resolver.columnPropertyName(table, col);
+            resourceToDto.put(dtoField, dtoField);
         }
-        StringBuilder sb = new StringBuilder();
-        for (String p : parts) {
-            if (p.isEmpty()) {
-                continue;
-            }
-            sb.append(Character.toUpperCase(p.charAt(0))).append(p.substring(1));
-        }
-        return sb.toString();
-    }
 
-    private static String toCamelCase(String s) {
-        String[] parts = s.toLowerCase().split("[^a-z0-9]+");
-        if (parts.length == 0) {
-            return s;
+        YamlSpec.ResourceTableOverride overrides = resolver.resourceOverride(table);
+        if (overrides == null || overrides.getFields() == null) {
+            return resourceToDto;
         }
-        StringBuilder sb = new StringBuilder(parts[0]);
-        for (int i = 1; i < parts.length; i++) {
-            if (parts[i].isEmpty()) {
+
+        for (Map.Entry<String, YamlSpec.ResourceFieldOverride> e : overrides.getFields().entrySet()) {
+            String targetResourceField = e.getKey();
+            YamlSpec.ResourceFieldOverride cfg = e.getValue();
+            if (cfg == null || cfg.getSourceDtoField() == null || cfg.getSourceDtoField().isBlank()) {
                 continue;
             }
-            sb.append(Character.toUpperCase(parts[i].charAt(0))).append(parts[i].substring(1));
+
+            String sourceDtoField = cfg.getSourceDtoField().trim();
+
+            // Rename semantics: remove original 1:1 mapping if target differs.
+            if (!targetResourceField.equals(sourceDtoField)) {
+                resourceToDto.remove(sourceDtoField);
+            }
+            resourceToDto.put(targetResourceField, sourceDtoField);
         }
-        return sb.toString();
+
+        return resourceToDto;
     }
 }

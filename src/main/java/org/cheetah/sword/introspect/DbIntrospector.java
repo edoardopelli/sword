@@ -17,6 +17,7 @@ import org.cheetah.sword.model.DbModel;
 import org.cheetah.sword.model.ForeignKeyModel;
 import org.cheetah.sword.model.RelationCardinality;
 import org.cheetah.sword.model.TableModel;
+import org.cheetah.sword.util.NameUtil;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -47,15 +48,16 @@ public class DbIntrospector {
 
                 try (ResultSet rs = meta.getColumns(catalog, schema, tableName, "%")) {
                     while (rs.next()) {
-                        ColumnModel col = ColumnModel.builder()
-                                .name(rs.getString("COLUMN_NAME"))
-                                .jdbcType(rs.getInt("DATA_TYPE"))
-                                .jdbcTypeName(rs.getString("TYPE_NAME"))
-                                .nullable("YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")))
-                                .size(intOrNull(rs, "COLUMN_SIZE"))
-                                .scale(intOrNull(rs, "DECIMAL_DIGITS"))
-                                .build();
-                        tb.column(col);
+                    	ColumnModel col = ColumnModel.builder()
+                    	        .name(rs.getString("COLUMN_NAME"))
+                    	        .propertyName(NameUtil.toLowerCamel(rs.getString("COLUMN_NAME")))
+                    	        .jdbcType(rs.getInt("DATA_TYPE"))
+                    	        .jdbcTypeName(rs.getString("TYPE_NAME"))
+                    	        .nullable("YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")))
+                    	        .size(intOrNull(rs, "COLUMN_SIZE"))
+                    	        .scale(intOrNull(rs, "DECIMAL_DIGITS"))
+                    	        .build();
+                    	tb.column(col);
                     }
                 }
 

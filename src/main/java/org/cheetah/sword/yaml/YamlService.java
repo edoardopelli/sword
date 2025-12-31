@@ -8,6 +8,7 @@ import org.cheetah.sword.model.DbModel;
 import org.cheetah.sword.model.ForeignKeyModel;
 import org.cheetah.sword.model.RelationCardinality;
 import org.cheetah.sword.model.TableModel;
+import org.cheetah.sword.util.NameUtil;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,6 +32,10 @@ public class YamlService {
         gen.setOutputDir(outputDir);
         spec.setGeneration(gen);
 
+        // Write naming defaults so user can edit later.
+        YamlSpec.Naming naming = new YamlSpec.Naming();
+        spec.setNaming(naming);
+
         for (TableModel t : dbModel.getTables()) {
             YamlSpec.Table yt = new YamlSpec.Table();
             yt.setName(t.getName());
@@ -39,6 +44,7 @@ public class YamlService {
             for (ColumnModel c : t.getColumns()) {
                 YamlSpec.Column yc = new YamlSpec.Column();
                 yc.setName(c.getName());
+                yc.setPropertyName(c.getPropertyName());
                 yc.setJdbcType(c.getJdbcType());
                 yc.setJdbcTypeName(c.getJdbcTypeName());
                 yc.setNullable(c.isNullable());
@@ -60,6 +66,20 @@ public class YamlService {
             }
 
             spec.getTables().add(yt);
+
+            // Defaults: <Table>Entity / <Table>DTO / <Table>Resource
+            YamlSpec.TableNaming tn = new YamlSpec.TableNaming();
+            String base = NameUtil.toUpperCamel(t.getName());
+            tn.setEntityName(base + "Entity");
+            tn.setDtoName(base + "DTO");
+            tn.setResourceName(base + "Resource");
+
+            // Default column mappings (db column -> java property)
+            for (ColumnModel c : t.getColumns()) {
+                tn.getColumns().put(c.getName(), c.getPropertyName());
+            }
+
+            naming.getTables().put(t.getName(), tn);
         }
 
         try {
@@ -105,6 +125,9 @@ public class YamlService {
             for (YamlSpec.Column c : t.getColumns()) {
                 tb.column(org.cheetah.sword.model.ColumnModel.builder()
                         .name(c.getName())
+                        .propertyName(c.getPropertyName() != null && !c.getPropertyName().isBlank()
+                                ? c.getPropertyName()
+                                : NameUtil.toLowerCamel(c.getName()))
                         .jdbcType(c.getJdbcType())
                         .jdbcTypeName(c.getJdbcTypeName())
                         .nullable(c.isNullable())

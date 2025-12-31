@@ -3,14 +3,16 @@ package org.cheetah.sword.generate.writers;
 import java.io.Serializable;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
-import org.cheetah.sword.generate.IdTypeHelper;
+import org.cheetah.sword.generate.NameResolver;
 import org.cheetah.sword.generate.TypeResolver;
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.ForeignKeyModel;
 import org.cheetah.sword.model.RelationCardinality;
 import org.cheetah.sword.model.TableModel;
+import org.cheetah.sword.util.NameUtil;
 
 import com.squareup.javapoet.AnnotationSpec;
 import com.squareup.javapoet.ClassName;
@@ -38,50 +40,46 @@ import lombok.NoArgsConstructor;
 
 public class EntityWriter {
 
+    private static final String EMBEDDED_ID_FIELD_NAME = "id";
+
     private final TypeResolver typeResolver = new TypeResolver();
-    private final IdTypeHelper idTypeHelper = new IdTypeHelper();
 
-    public void write(Path outputDir, String basePackage, String schema, TableModel table) {
-        String className = IdTypeHelper.toPascalCase(table.getName()) + "Entity";
-        ClassName entityType = ClassName.get(basePackage + ".entities", className);
-
-        // Collect FK columns to avoid generating duplicate scalar fields (we *do* want FK scalar fields).
-        // For persistence simplicity we keep FK scalar fields and add relation fields as read-only (insertable/updatable=false).
-        Set<String> fkColumns = new HashSet<>();
-        if (table.getForeignKeys() != null) {
-            for (ForeignKeyModel fk : table.getForeignKeys()) {
-                fkColumns.addAll(fk.getFromColumns());
-            }
-        }
+    public void write(Path outputDir, NameResolver resolver, String schema, TableModel table) {
+        ClassName entityType = ClassName.get(resolver.entitiesPackage(), resolver.entitySimpleName(table));
+        ClassName embeddedIdType = embeddedIdClassName(resolver, table);
 
         TypeSpec.Builder type = TypeSpec.classBuilder(entityType)
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
                 .addAnnotation(Data.class)
                 .addAnnotation(Entity.class)
-                .addAnnotation(AnnotationSpec.builder(Table.class)
-                        .addMember("name", "$S", table.getName())
-                        .addMember("schema", "$S", schema == null ? "" : schema)
-                        .build());
+                .addAnnotation(buildTableAnnotation(schema, table.getName()));
+
+        // Track used field names to avoid collisions when adding relation fields.
+        Set<String> usedFieldNames = new HashSet<>();
 
         if (table.hasCompositePrimaryKey()) {
-            ClassName idClass = idTypeHelper.embeddedIdClassName(basePackage, table);
-            type.addField(FieldSpec.builder(idClass, "id")
+            type.addField(FieldSpec.builder(embeddedIdType, EMBEDDED_ID_FIELD_NAME)
                     .addModifiers(javax.lang.model.element.Modifier.PRIVATE)
                     .addAnnotation(EmbeddedId.class)
                     .build());
+            usedFieldNames.add(EMBEDDED_ID_FIELD_NAME);
 
-            writeEmbeddedId(outputDir, basePackage, table);
+            writeEmbeddedId(outputDir, resolver, table);
         }
 
+        // Columns -> fields
         for (ColumnModel col : table.getColumns()) {
             boolean isPkCol = table.getPrimaryKeyColumns() != null && table.getPrimaryKeyColumns().contains(col.getName());
 
-            // Composite PK columns are stored in the EmbeddedId class (not as direct fields).
+            // Composite PK columns are represented inside the EmbeddedId class.
             if (table.hasCompositePrimaryKey() && isPkCol) {
                 continue;
             }
 
-            FieldSpec.Builder field = FieldSpec.builder(typeResolver.toJavaType(col.getJdbcType()), IdTypeHelper.toCamelCase(col.getName()))
+            String fieldName = resolver.columnPropertyName(table, col);
+            usedFieldNames.add(fieldName);
+
+            FieldSpec.Builder field = FieldSpec.builder(typeResolver.toJavaType(col.getJdbcType()), fieldName)
                     .addModifiers(javax.lang.model.element.Modifier.PRIVATE)
                     .addAnnotation(AnnotationSpec.builder(Column.class)
                             .addMember("name", "$S", col.getName())
@@ -95,10 +93,10 @@ public class EntityWriter {
             type.addField(field.build());
         }
 
-        // Relations (read-only to avoid requiring entity resolution at write time)
+        // Relations (read-only): insertable=false, updatable=false.
         if (table.getForeignKeys() != null) {
             for (ForeignKeyModel fk : table.getForeignKeys()) {
-                addRelationField(type, basePackage, fk);
+                addRelationField(type, resolver, fk, usedFieldNames);
             }
         }
 
@@ -113,11 +111,29 @@ public class EntityWriter {
         }
     }
 
-    private void addRelationField(TypeSpec.Builder entity, String basePackage, ForeignKeyModel fk) {
-        String toEntityName = IdTypeHelper.toPascalCase(fk.getToTable()) + "Entity";
-        ClassName toEntityType = ClassName.get(basePackage + ".entities", toEntityName);
+    private static AnnotationSpec buildTableAnnotation(String schema, String tableName) {
+        AnnotationSpec.Builder b = AnnotationSpec.builder(Table.class)
+                .addMember("name", "$S", tableName);
 
-        String fieldName = IdTypeHelper.toCamelCase(fk.getToTable());
+        if (schema != null && !schema.isBlank()) {
+            b.addMember("schema", "$S", schema);
+        }
+
+        return b.build();
+    }
+
+    private void addRelationField(TypeSpec.Builder entity,
+                                  NameResolver resolver,
+                                  ForeignKeyModel fk,
+                                  Set<String> usedFieldNames) {
+
+        String toEntitySimpleName = resolver.entitySimpleName(TableModel.builder().name(fk.getToTable()).build());
+        ClassName toEntityType = ClassName.get(resolver.entitiesPackage(), toEntitySimpleName);
+
+        // Default relation field name is derived from target table name.
+        String baseFieldName = NameUtil.toLowerCamel(fk.getToTable());
+        String fieldName = uniqueFieldName(baseFieldName, usedFieldNames);
+        usedFieldNames.add(fieldName);
 
         AnnotationSpec relationAnn;
         if (fk.getCardinality() == RelationCardinality.ONE_TO_ONE) {
@@ -157,8 +173,19 @@ public class EntityWriter {
         entity.addField(field.build());
     }
 
-    private void writeEmbeddedId(Path outputDir, String basePackage, TableModel table) {
-        ClassName idType = idTypeHelper.embeddedIdClassName(basePackage, table);
+    private static String uniqueFieldName(String base, Set<String> used) {
+        if (!used.contains(base)) {
+            return base;
+        }
+        int i = 1;
+        while (used.contains(base + "Ref" + i)) {
+            i++;
+        }
+        return base + "Ref" + i;
+    }
+
+    private void writeEmbeddedId(Path outputDir, NameResolver resolver, TableModel table) {
+        ClassName idType = embeddedIdClassName(resolver, table);
 
         TypeSpec.Builder id = TypeSpec.classBuilder(idType)
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
@@ -170,31 +197,32 @@ public class EntityWriter {
                 .addAnnotation(EqualsAndHashCode.class);
 
         id.addField(FieldSpec.builder(TypeName.LONG, "serialVersionUID")
-                .addModifiers(javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.STATIC, javax.lang.model.element.Modifier.FINAL)
+                .addModifiers(javax.lang.model.element.Modifier.PRIVATE,
+                        javax.lang.model.element.Modifier.STATIC,
+                        javax.lang.model.element.Modifier.FINAL)
                 .initializer("$LL", 1L)
                 .build());
 
-        for (String pkCol : table.getPrimaryKeyColumns()) {
-            ColumnModel col = table.getColumns().stream()
-                    .filter(c -> pkCol.equals(c.getName()))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalStateException("PK column not found in columns list: " + pkCol));
+        for (String pkColName : table.getPrimaryKeyColumns()) {
+            ColumnModel pkCol = findColumn(table, pkColName)
+                    .orElseThrow(() -> new IllegalStateException("PK column not found in table columns: " + pkColName));
 
-            id.addField(FieldSpec.builder(typeResolver.toJavaType(col.getJdbcType()), IdTypeHelper.toCamelCase(pkCol))
+            String fieldName = resolver.columnPropertyName(table, pkCol);
+
+            id.addField(FieldSpec.builder(typeResolver.toJavaType(pkCol.getJdbcType()), fieldName)
                     .addModifiers(javax.lang.model.element.Modifier.PRIVATE)
                     .addAnnotation(AnnotationSpec.builder(Column.class)
-                            .addMember("name", "$S", pkCol)
+                            .addMember("name", "$S", pkCol.getName())
                             .addMember("nullable", "$L", false)
                             .build())
                     .build());
         }
 
-        // Ensure stable constructor order: pk column order in metadata list is used as-is.
-        MethodSpec ctor = MethodSpec.constructorBuilder()
+        // Lombok generates constructors; keep an explicit comment-only ctor to clarify intent.
+        id.addMethod(MethodSpec.constructorBuilder()
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
-                .addComment("Generated constructor is provided by Lombok @AllArgsConstructor.")
-                .build();
-        id.addMethod(ctor);
+                .addComment("Constructors are generated by Lombok annotations.")
+                .build());
 
         JavaFile javaFile = JavaFile.builder(idType.packageName(), id.build())
                 .indent("    ")
@@ -205,5 +233,17 @@ public class EntityWriter {
         } catch (Exception ex) {
             throw new IllegalStateException("EmbeddedId generation failed for table: " + table.getName(), ex);
         }
+    }
+
+    private static Optional<ColumnModel> findColumn(TableModel table, String columnName) {
+        return table.getColumns().stream()
+                .filter(c -> columnName.equals(c.getName()))
+                .findFirst();
+    }
+
+    private static ClassName embeddedIdClassName(NameResolver resolver, TableModel table) {
+        // Keep EmbeddedId class name stable and table-based.
+        String idSimpleName = NameUtil.toUpperCamel(table.getName()) + "Id";
+        return ClassName.get(resolver.entityIdsPackage(), idSimpleName);
     }
 }

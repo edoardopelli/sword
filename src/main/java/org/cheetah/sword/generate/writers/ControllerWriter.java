@@ -1,11 +1,14 @@
 package org.cheetah.sword.generate.writers;
 
 import java.nio.file.Path;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
-import org.cheetah.sword.generate.IdTypeHelper;
+import org.cheetah.sword.generate.NameResolver;
 import org.cheetah.sword.generate.TypeResolver;
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.TableModel;
+import org.cheetah.sword.util.NameUtil;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -25,19 +28,20 @@ import com.squareup.javapoet.TypeSpec;
 
 public class ControllerWriter {
 
-    private final IdTypeHelper idTypeHelper = new IdTypeHelper();
     private final TypeResolver typeResolver = new TypeResolver();
 
-    public void write(Path outputDir, String basePackage, TableModel table) {
-        String name = IdTypeHelper.toPascalCase(table.getName()) + "Controller";
-        ClassName controllerType = ClassName.get(basePackage + ".controllers", name);
+    public void write(Path outputDir, NameResolver resolver, TableModel table) {
+        String controllerSimpleName = NameUtil.toUpperCamel(table.getName()) + "Controller";
+        ClassName controllerType = ClassName.get(resolver.controllersPackage(), controllerSimpleName);
 
-        ClassName serviceType = ClassName.get(basePackage + ".services", IdTypeHelper.toPascalCase(table.getName()) + "Service");
-        ClassName dtoType = ClassName.get(basePackage + ".dtos", IdTypeHelper.toPascalCase(table.getName()) + "DTO");
-        ClassName resourceType = ClassName.get(basePackage + ".resources", IdTypeHelper.toPascalCase(table.getName()) + "Resource");
-        ClassName resourceMapperType = ClassName.get(basePackage + ".mappers", IdTypeHelper.toPascalCase(table.getName()) + "ResourceMapper");
+        String serviceSimpleName = NameUtil.toUpperCamel(table.getName()) + "Service";
+        ClassName serviceType = ClassName.get(resolver.servicesPackage(), serviceSimpleName);
 
-        TypeName idType = idTypeHelper.repositoryIdType(basePackage, table);
+        String resourceMapperSimpleName = resolver.resourceSimpleName(table) + "Mapper";
+        ClassName resourceMapperType = ClassName.get(resolver.mappersPackage(), resourceMapperSimpleName);
+
+        ClassName dtoType = ClassName.get(resolver.dtosPackage(), resolver.dtoSimpleName(table));
+        ClassName resourceType = ClassName.get(resolver.resourcesPackage(), resolver.resourceSimpleName(table));
 
         FieldSpec service = FieldSpec.builder(serviceType, "service",
                 javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.FINAL).build();
@@ -54,9 +58,9 @@ public class ControllerWriter {
 
         String basePath = "/" + table.getName().toLowerCase();
 
-        MethodSpec getById = buildGetById(basePackage, table, dtoType, resourceType, idType);
+        MethodSpec getById = buildGetById(resolver, table, dtoType, resourceType);
         MethodSpec create = buildCreate(dtoType, resourceType);
-        MethodSpec delete = buildDelete(basePackage, table, idType);
+        MethodSpec delete = buildDelete(resolver, table);
 
         TypeSpec type = TypeSpec.classBuilder(controllerType)
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
@@ -81,39 +85,44 @@ public class ControllerWriter {
         }
     }
 
-    private MethodSpec buildGetById(String basePackage, TableModel table, ClassName dtoType, ClassName resourceType, TypeName idType) {
+    private MethodSpec buildGetById(NameResolver resolver, TableModel table, ClassName dtoType, ClassName resourceType) {
         MethodSpec.Builder m = MethodSpec.methodBuilder("getById")
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
                 .returns(resourceType);
 
         if (table.hasCompositePrimaryKey()) {
-            String path = compositePkPath(table);
+            String path = compositePkPath(resolver, table);
             m.addAnnotation(AnnotationSpec.builder(GetMapping.class).addMember("value", "$S", path).build());
 
-            // Path variables for each PK column (flattened)
-            for (String pkCol : table.getPrimaryKeyColumns()) {
-                ColumnModel col = findColumn(table, pkCol);
-                TypeName pkType = typeResolver.toJavaType(col.getJdbcType());
-                String paramName = IdTypeHelper.toCamelCase(pkCol);
-                m.addParameter(ParameterSpecFactory.pathVariable(pkType, paramName));
+            // Declare path variables in PK order.
+            for (String pkColName : table.getPrimaryKeyColumns()) {
+                ColumnModel pkCol = findColumn(table, pkColName)
+                        .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+
+                String varName = resolver.columnPropertyName(table, pkCol);
+                TypeName varType = typeResolver.toJavaType(pkCol.getJdbcType());
+                m.addParameter(pathVariable(varType, varName));
             }
 
-            // Build EmbeddedId object
-            ClassName idClass = idTypeHelper.embeddedIdClassName(basePackage, table);
+            ClassName idClass = ClassName.get(resolver.entityIdsPackage(), NameUtil.toUpperCamel(table.getName()) + "Id");
             String ctorArgs = table.getPrimaryKeyColumns().stream()
-                    .map(IdTypeHelper::toCamelCase)
-                    .reduce((a, b) -> a + ", " + b)
-                    .orElse("");
+                    .map(pkColName -> {
+                        ColumnModel pkCol = findColumn(table, pkColName)
+                                .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+                        return resolver.columnPropertyName(table, pkCol);
+                    })
+                    .collect(Collectors.joining(", "));
 
-            m.addStatement("$T id = new $T($L)", idType, idClass, ctorArgs);
+            m.addStatement("$T id = new $T($L)", idClass, idClass, ctorArgs);
             m.addStatement("$T dto = service.getById(id)", dtoType);
             m.addStatement("return mapper.toResource(dto)");
             return m.build();
         }
 
-        // Single PK
+        // Single PK path variable is "id"
         m.addAnnotation(AnnotationSpec.builder(GetMapping.class).addMember("value", "$S", "/{id}").build());
-        m.addParameter(ParameterSpecFactory.pathVariable(idType, "id"));
+        TypeName idType = singlePkType(table);
+        m.addParameter(pathVariable(idType, "id"));
         m.addStatement("$T dto = service.getById(id)", dtoType);
         m.addStatement("return mapper.toResource(dto)");
         return m.build();
@@ -124,76 +133,88 @@ public class ControllerWriter {
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
                 .returns(resourceType)
                 .addAnnotation(AnnotationSpec.builder(PostMapping.class).build())
-                .addParameter(ParameterSpecFactory.requestBody(resourceType, "resource"))
+                .addParameter(requestBody(resourceType, "resource"))
                 .addStatement("$T dto = mapper.toDto(resource)", dtoType)
                 .addStatement("$T saved = service.create(dto)", dtoType)
                 .addStatement("return mapper.toResource(saved)")
                 .build();
     }
 
-    private MethodSpec buildDelete(String basePackage, TableModel table, TypeName idType) {
+    private MethodSpec buildDelete(NameResolver resolver, TableModel table) {
         MethodSpec.Builder m = MethodSpec.methodBuilder("delete")
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC);
 
         if (table.hasCompositePrimaryKey()) {
-            String path = compositePkPath(table);
+            String path = compositePkPath(resolver, table);
             m.addAnnotation(AnnotationSpec.builder(DeleteMapping.class).addMember("value", "$S", path).build());
 
-            for (String pkCol : table.getPrimaryKeyColumns()) {
-                ColumnModel col = findColumn(table, pkCol);
-                TypeName pkType = typeResolver.toJavaType(col.getJdbcType());
-                String paramName = IdTypeHelper.toCamelCase(pkCol);
-                m.addParameter(ParameterSpecFactory.pathVariable(pkType, paramName));
+            for (String pkColName : table.getPrimaryKeyColumns()) {
+                ColumnModel pkCol = findColumn(table, pkColName)
+                        .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+
+                String varName = resolver.columnPropertyName(table, pkCol);
+                TypeName varType = typeResolver.toJavaType(pkCol.getJdbcType());
+                m.addParameter(pathVariable(varType, varName));
             }
 
-            ClassName idClass = idTypeHelper.embeddedIdClassName(basePackage, table);
+            ClassName idClass = ClassName.get(resolver.entityIdsPackage(), NameUtil.toUpperCamel(table.getName()) + "Id");
             String ctorArgs = table.getPrimaryKeyColumns().stream()
-                    .map(IdTypeHelper::toCamelCase)
-                    .reduce((a, b) -> a + ", " + b)
-                    .orElse("");
+                    .map(pkColName -> {
+                        ColumnModel pkCol = findColumn(table, pkColName)
+                                .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+                        return resolver.columnPropertyName(table, pkCol);
+                    })
+                    .collect(Collectors.joining(", "));
 
-            m.addStatement("$T id = new $T($L)", idType, idClass, ctorArgs);
+            m.addStatement("$T id = new $T($L)", idClass, idClass, ctorArgs);
             m.addStatement("service.delete(id)");
             return m.build();
         }
 
-        // Single PK
         m.addAnnotation(AnnotationSpec.builder(DeleteMapping.class).addMember("value", "$S", "/{id}").build());
-        m.addParameter(ParameterSpecFactory.pathVariable(idType, "id"));
+        TypeName idType = singlePkType(table);
+        m.addParameter(pathVariable(idType, "id"));
         m.addStatement("service.delete(id)");
         return m.build();
     }
 
-    private static String compositePkPath(TableModel table) {
+    private static String compositePkPath(NameResolver resolver, TableModel table) {
         StringBuilder sb = new StringBuilder();
-        for (String pkCol : table.getPrimaryKeyColumns()) {
-            sb.append("/{").append(IdTypeHelper.toCamelCase(pkCol)).append("}");
+        for (String pkColName : table.getPrimaryKeyColumns()) {
+            ColumnModel pkCol = findColumn(table, pkColName)
+                    .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+            String varName = resolver.columnPropertyName(table, pkCol);
+            sb.append("/{").append(varName).append("}");
         }
         return sb.toString();
     }
 
-    private static ColumnModel findColumn(TableModel table, String colName) {
-        return table.getColumns().stream()
-                .filter(c -> colName.equals(c.getName()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("PK column not found in columns list: " + colName));
+    private TypeName singlePkType(TableModel table) {
+        if (table.hasSinglePrimaryKey()) {
+            String pkColName = table.getPrimaryKeyColumns().get(0);
+            Optional<ColumnModel> pk = table.getColumns().stream().filter(c -> pkColName.equals(c.getName())).findFirst();
+            if (pk.isPresent()) {
+                return typeResolver.toJavaType(pk.get().getJdbcType());
+            }
+        }
+        return ClassName.get(Long.class);
     }
 
-    private static final class ParameterSpecFactory {
+    private static Optional<ColumnModel> findColumn(TableModel table, String columnName) {
+        return table.getColumns().stream()
+                .filter(c -> columnName.equals(c.getName()))
+                .findFirst();
+    }
 
-        private static ParameterSpec pathVariable(TypeName type, String name) {
-            return ParameterSpec.builder(type, name)
-                    .addAnnotation(AnnotationSpec.builder(PathVariable.class).addMember("value", "$S", name).build())
-                    .build();
-        }
+    private static ParameterSpec pathVariable(TypeName type, String name) {
+        return ParameterSpec.builder(type, name)
+                .addAnnotation(AnnotationSpec.builder(PathVariable.class).addMember("value", "$S", name).build())
+                .build();
+    }
 
-        private static ParameterSpec requestBody(TypeName type, String name) {
-            return ParameterSpec.builder(type, name)
-                    .addAnnotation(RequestBody.class)
-                    .build();
-        }
-
-        private ParameterSpecFactory() {
-        }
+    private static ParameterSpec requestBody(TypeName type, String name) {
+        return ParameterSpec.builder(type, name)
+                .addAnnotation(RequestBody.class)
+                .build();
     }
 }
