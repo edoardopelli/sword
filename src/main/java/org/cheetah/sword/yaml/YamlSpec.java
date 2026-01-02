@@ -97,6 +97,14 @@ public class YamlSpec {
         private boolean nullable;
         private Integer size;
         private Integer scale;
+
+        /**
+         * Optional ID generation hints (persisted from DB introspection).
+         * These are needed to regenerate @GeneratedValue consistently from YAML.
+         */
+        private boolean autoIncrement;
+        private String idGeneration; // NONE / IDENTITY / SEQUENCE
+        private String sequenceName; // only when idGeneration == SEQUENCE
     }
 
     @Data

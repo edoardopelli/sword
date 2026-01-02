@@ -2,10 +2,12 @@ package org.cheetah.sword.yaml;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.DbModel;
 import org.cheetah.sword.model.ForeignKeyModel;
+import org.cheetah.sword.model.IdGeneration;
 import org.cheetah.sword.model.RelationCardinality;
 import org.cheetah.sword.model.TableModel;
 import org.cheetah.sword.util.NameUtil;
@@ -50,6 +52,12 @@ public class YamlService {
                 yc.setNullable(c.isNullable());
                 yc.setSize(c.getSize());
                 yc.setScale(c.getScale());
+
+                // Persist ID generation hints (optional).
+                yc.setAutoIncrement(c.isAutoIncrement());
+                yc.setIdGeneration(c.getIdGeneration() != null ? c.getIdGeneration().name() : null);
+                yc.setSequenceName(c.getSequenceName());
+
                 yt.getColumns().add(yc);
             }
 
@@ -123,7 +131,10 @@ public class YamlService {
                     .primaryKeyColumns(t.getPrimaryKeyColumns());
 
             for (YamlSpec.Column c : t.getColumns()) {
-                tb.column(org.cheetah.sword.model.ColumnModel.builder()
+                IdGeneration idGen = parseIdGeneration(c.getIdGeneration(), t.getName(), c.getName());
+                String seqName = (idGen == IdGeneration.SEQUENCE) ? c.getSequenceName() : null;
+
+                tb.column(ColumnModel.builder()
                         .name(c.getName())
                         .propertyName(c.getPropertyName() != null && !c.getPropertyName().isBlank()
                                 ? c.getPropertyName()
@@ -133,12 +144,18 @@ public class YamlService {
                         .nullable(c.isNullable())
                         .size(c.getSize())
                         .scale(c.getScale())
+
+                        // Restore ID generation hints (optional).
+                        .autoIncrement(c.isAutoIncrement())
+                        .idGeneration(idGen)
+                        .sequenceName(seqName)
+
                         .build());
             }
 
             if (t.getForeignKeys() != null) {
                 for (YamlSpec.ForeignKey fk : t.getForeignKeys()) {
-                    tb.foreignKey(org.cheetah.sword.model.ForeignKeyModel.builder()
+                    tb.foreignKey(ForeignKeyModel.builder()
                             .name(fk.getName())
                             .fromColumns(fk.getFromColumns())
                             .toTable(fk.getToTable())
@@ -152,5 +169,20 @@ public class YamlService {
         }
 
         return db.build();
+    }
+
+    private static IdGeneration parseIdGeneration(String raw, String tableName, String columnName) {
+        if (raw == null || raw.isBlank()) {
+            return IdGeneration.NONE;
+        }
+        String v = raw.trim().toUpperCase(Locale.ROOT);
+        try {
+            return IdGeneration.valueOf(v);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException(
+                    "Invalid YAML: unsupported idGeneration '" + raw + "' for " + tableName + "." + columnName
+                            + ". Allowed values: NONE, IDENTITY, SEQUENCE",
+                    ex);
+        }
     }
 }

@@ -3,6 +3,7 @@ package org.cheetah.sword.generate.writers;
 import java.io.Serializable;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -10,6 +11,7 @@ import org.cheetah.sword.generate.NameResolver;
 import org.cheetah.sword.generate.TypeResolver;
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.ForeignKeyModel;
+import org.cheetah.sword.model.IdGeneration;
 import org.cheetah.sword.model.RelationCardinality;
 import org.cheetah.sword.model.TableModel;
 import org.cheetah.sword.util.NameUtil;
@@ -18,7 +20,7 @@ import com.squareup.javapoet.AnnotationSpec;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
-import com.squareup.javapoet.MethodSpec;
+import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 
@@ -27,16 +29,18 @@ import jakarta.persistence.Embeddable;
 import jakarta.persistence.EmbeddedId;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.JoinColumns;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToOne;
+import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
-import lombok.NoArgsConstructor;
 
 public class EntityWriter {
 
@@ -54,7 +58,9 @@ public class EntityWriter {
                 .addAnnotation(Entity.class)
                 .addAnnotation(buildTableAnnotation(schema, table.getName()));
 
-        // Track used field names to avoid collisions when adding relation fields.
+        // If single PK is SEQUENCE, add @SequenceGenerator at entity level.
+        maybeAddSequenceGenerator(type, table);
+
         Set<String> usedFieldNames = new HashSet<>();
 
         if (table.hasCompositePrimaryKey()) {
@@ -67,11 +73,9 @@ public class EntityWriter {
             writeEmbeddedId(outputDir, resolver, table);
         }
 
-        // Columns -> fields
         for (ColumnModel col : table.getColumns()) {
             boolean isPkCol = table.getPrimaryKeyColumns() != null && table.getPrimaryKeyColumns().contains(col.getName());
 
-            // Composite PK columns are represented inside the EmbeddedId class.
             if (table.hasCompositePrimaryKey() && isPkCol) {
                 continue;
             }
@@ -79,21 +83,25 @@ public class EntityWriter {
             String fieldName = resolver.columnPropertyName(table, col);
             usedFieldNames.add(fieldName);
 
-            FieldSpec.Builder field = FieldSpec.builder(typeResolver.toJavaType(col.getJdbcType()), fieldName)
+            TypeName fieldType = resolveEntityFieldType(col);
+
+            FieldSpec.Builder field = FieldSpec.builder(fieldType, fieldName)
                     .addModifiers(javax.lang.model.element.Modifier.PRIVATE)
-                    .addAnnotation(AnnotationSpec.builder(Column.class)
-                            .addMember("name", "$S", col.getName())
-                            .addMember("nullable", "$L", col.isNullable())
-                            .build());
+                    .addAnnotation(buildColumnAnnotation(col));
+
+            // Hibernate 6 JSON handling for json/jsonb columns (PostgreSQL).
+            if (isJsonColumn(col)) {
+                field.addAnnotation(buildJdbcTypeCodeJsonAnnotation());
+            }
 
             if (table.hasSinglePrimaryKey() && isPkCol) {
                 field.addAnnotation(Id.class);
+                maybeAddGeneratedValue(field, table, col);
             }
 
             type.addField(field.build());
         }
 
-        // Relations (read-only): insertable=false, updatable=false.
         if (table.getForeignKeys() != null) {
             for (ForeignKeyModel fk : table.getForeignKeys()) {
                 addRelationField(type, resolver, fk, usedFieldNames);
@@ -109,6 +117,104 @@ public class EntityWriter {
         } catch (Exception ex) {
             throw new IllegalStateException("Entity generation failed for table: " + table.getName(), ex);
         }
+    }
+
+    private TypeName resolveEntityFieldType(ColumnModel col) {
+        if (isJsonColumn(col)) {
+        	return ParameterizedTypeName.get(
+                    ClassName.get(Map.class),
+                    ClassName.get(String.class),
+                    ClassName.get(Object.class)
+            );
+        }
+        return typeResolver.toJavaType(col.getJdbcType());
+    }
+
+    private static AnnotationSpec buildJdbcTypeCodeJsonAnnotation() {
+        // @JdbcTypeCode(SqlTypes.JSON)
+        ClassName jdbcTypeCode = ClassName.get("org.hibernate.annotations", "JdbcTypeCode");
+        ClassName sqlTypes = ClassName.get("org.hibernate.type", "SqlTypes");
+        return AnnotationSpec.builder(jdbcTypeCode)
+                .addMember("value", "$T.JSON", sqlTypes)
+                .build();
+    }
+
+    private static AnnotationSpec buildColumnAnnotation(ColumnModel col) {
+        AnnotationSpec.Builder b = AnnotationSpec.builder(Column.class)
+                .addMember("name", "$S", col.getName())
+                .addMember("nullable", "$L", col.isNullable());
+
+        // For PostgreSQL json/jsonb, forcing columnDefinition avoids wrong binding/cast issues.
+        if (isJsonColumn(col)) {
+            String def = safeLower(col.getJdbcTypeName());
+            if (def == null || def.isBlank()) {
+                def = "jsonb";
+            }
+            b.addMember("columnDefinition", "$S", def);
+        }
+
+        return b.build();
+    }
+
+    private void maybeAddGeneratedValue(FieldSpec.Builder field, TableModel table, ColumnModel pkCol) {
+        if (pkCol.getIdGeneration() == null || pkCol.getIdGeneration() == IdGeneration.NONE) {
+            return;
+        }
+
+        if (pkCol.getIdGeneration() == IdGeneration.IDENTITY) {
+            field.addAnnotation(AnnotationSpec.builder(GeneratedValue.class)
+                    .addMember("strategy", "$T.IDENTITY", GenerationType.class)
+                    .build());
+            return;
+        }
+
+        if (pkCol.getIdGeneration() == IdGeneration.SEQUENCE) {
+            String seq = pkCol.getSequenceName();
+            if (seq == null || seq.isBlank()) {
+                // Sequence strategy requires a sequence name; if missing, do not generate broken annotations.
+                return;
+            }
+
+            String generatorName = sequenceGeneratorName(table);
+
+            field.addAnnotation(AnnotationSpec.builder(GeneratedValue.class)
+                    .addMember("strategy", "$T.SEQUENCE", GenerationType.class)
+                    .addMember("generator", "$S", generatorName)
+                    .build());
+        }
+    }
+
+    private void maybeAddSequenceGenerator(TypeSpec.Builder entityType, TableModel table) {
+        if (!table.hasSinglePrimaryKey()) {
+            return;
+        }
+
+        String pkName = table.getPrimaryKeyColumns().get(0);
+        ColumnModel pkCol = table.getColumns().stream()
+                .filter(c -> pkName.equals(c.getName()))
+                .findFirst()
+                .orElse(null);
+
+        if (pkCol == null || pkCol.getIdGeneration() != IdGeneration.SEQUENCE) {
+            return;
+        }
+
+        String seq = pkCol.getSequenceName();
+        if (seq == null || seq.isBlank()) {
+            return;
+        }
+
+        String generatorName = sequenceGeneratorName(table);
+
+        entityType.addAnnotation(AnnotationSpec.builder(SequenceGenerator.class)
+                .addMember("name", "$S", generatorName)
+                .addMember("sequenceName", "$S", seq)
+                .addMember("allocationSize", "$L", 1)
+                .build());
+    }
+
+    private static String sequenceGeneratorName(TableModel table) {
+        return NameUtil.toLowerCamel(table.getName()) + "_id_seq_gen";
     }
 
     private static AnnotationSpec buildTableAnnotation(String schema, String tableName) {
@@ -130,7 +236,6 @@ public class EntityWriter {
         String toEntitySimpleName = resolver.entitySimpleName(TableModel.builder().name(fk.getToTable()).build());
         ClassName toEntityType = ClassName.get(resolver.entitiesPackage(), toEntitySimpleName);
 
-        // Default relation field name is derived from target table name.
         String baseFieldName = NameUtil.toLowerCamel(fk.getToTable());
         String fieldName = uniqueFieldName(baseFieldName, usedFieldNames);
         usedFieldNames.add(fieldName);
@@ -192,7 +297,6 @@ public class EntityWriter {
                 .addSuperinterface(ClassName.get(Serializable.class))
                 .addAnnotation(Embeddable.class)
                 .addAnnotation(Data.class)
-                .addAnnotation(NoArgsConstructor.class)
                 .addAnnotation(AllArgsConstructor.class)
                 .addAnnotation(EqualsAndHashCode.class);
 
@@ -218,12 +322,6 @@ public class EntityWriter {
                     .build());
         }
 
-        // Lombok generates constructors; keep an explicit comment-only ctor to clarify intent.
-        id.addMethod(MethodSpec.constructorBuilder()
-                .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
-                .addComment("Constructors are generated by Lombok annotations.")
-                .build());
-
         JavaFile javaFile = JavaFile.builder(idType.packageName(), id.build())
                 .indent("    ")
                 .build();
@@ -242,8 +340,29 @@ public class EntityWriter {
     }
 
     private static ClassName embeddedIdClassName(NameResolver resolver, TableModel table) {
-        // Keep EmbeddedId class name stable and table-based.
         String idSimpleName = NameUtil.toUpperCamel(table.getName()) + "Id";
         return ClassName.get(resolver.entityIdsPackage(), idSimpleName);
+    }
+
+    private static boolean isJsonColumn(ColumnModel col) {
+        String t = safeLower(col.getJdbcTypeName());
+        if ("jsonb".equals(t) || "json".equals(t)) {
+            return true;
+        }
+        // Fallback: some drivers expose OTHER with typeName null; we can try the column name heuristics is NOT ok,
+        // so we keep it strict. If you want a fallback based on jdbcType, uncomment:
+        // return col.getJdbcType() == java.sql.Types.OTHER && (t == null || t.isBlank());
+        return false;
+    }
+
+    private static String safeLower(String v) {
+        if (v == null) {
+            return null;
+        }
+        String t = v.trim();
+        if (t.isEmpty()) {
+            return null;
+        }
+        return t.toLowerCase();
     }
 }
