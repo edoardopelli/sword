@@ -1,316 +1,220 @@
+# S.W.O.R.D. — Schema-Wide Object Reverse Designer
 
-# 🗡️ S.W.O.R.D. — Schema-Wide Object Reverse Designer
+S.W.O.R.D. è un tool **CLI** in **Java 21 + Spring Boot** che esegue reverse engineering di uno schema SQL e genera:
 
-S.W.O.R.D. automatically generates entities, DTOs, repositories, services, resources, mappers, and controllers from an existing database schema.
-
----
-
-## 1. Overview
-
-The generator connects to a relational database and inspects metadata to produce a complete Spring Boot‑style data layer.
-
-You can configure:
-- Base package and output directory
-- FK representation (scalar IDs or relations)
-- Fetch strategy for relations (lazy or eager)
-- Whether to generate DTOs, Repositories, Services, Controllers
-- Optional YAML mapping file to control naming
+- un file **YAML** che descrive il modello del database (**senza** informazioni di connessione)
+- codice Java: **JPA Entities (Jakarta)**, **DTO**, **Resources**, **Repositories**, **Services**, **Controllers** e **MapStruct mappers**
+- supporto **PK composite** con `@EmbeddedId`
+- supporto PostgreSQL **json/jsonb** (binding corretto in insert/update)
 
 ---
 
-## 2. Supported databases
+## Come funziona (overview)
 
-| Database | Notes |
-|-----------|--------|
-| PostgreSQL | Default schema `public` |
-| MySQL / MariaDB | Catalog-based |
-| SQL Server | Default schema `dbo` |
-| DB2 | Default schema `SAMPLE` |
-| H2 | Default schema `PUBLIC` |
+Il flusso generato è:
 
----
+```
+Controller (Resource API)
+  -> Mapper (Resource <-> DTO)   [MapStruct]
+    -> Service (DTO)
+      -> Mapper (Entity <-> DTO) [MapStruct]
+        -> Repository (Entity)   [Spring Data JPA]
+          -> DB
+```
 
-## 3. Entity generation rules
-
-- Each table becomes a Java class annotated with `@Entity`.
-- Composite primary keys generate a separate `@Embeddable` ID class.
-- Table names are converted to singular CamelCase class names.
-- Column names become lowerCamelCase fields.
-- Foreign keys are represented as:
-  - Scalar fields (e.g., `Long customerId`) when FK mode = SCALAR.
-  - JPA relations (`@ManyToOne`, `@OneToOne`) when FK mode = RELATION.
-- Optional fetch type per relation (LAZY or EAGER).
+- Il **Repository** lavora su **Entity**
+- Il **Service** espone **DTO**
+- Il **Controller** espone **Resource**
+- I **Mapper** trasformano gli oggetti tra i layer
 
 ---
 
-## 4. Naming configuration (YAML)
+## Naming e regole principali
 
-You can optionally provide a YAML file to customize naming for tables and columns.
+### snake_case -> camelCase
+Se una colonna è `customer_id` la property Java diventa `customerId`.
 
-Example:
+### Relazioni
+- Le relazioni **ManyToOne** e **OneToOne** sono generate nelle **Entity** con fetch configurabile (default `LAZY`).
+- In **DTO/Resource**:
+  - **NON** vengono mappate `OneToMany` e `ManyToMany`
+  - in caso di FK, nel DTO/Resource vengono riportati **gli id** (campi FK) e non l’oggetto referenziato
+
+### Primary key
+- PK singola: `@Id`
+- PK composta: `@EmbeddedId` + classe `<TableName>Id` `@Embeddable`
+
+### Auto-increment / identity / sequence
+Per tabelle con PK singola, il tool può persistere in YAML gli hint:
+- `idGeneration: NONE | IDENTITY | SEQUENCE`
+- `sequenceName` quando `SEQUENCE`
+
+Così la pipeline **YAML → Code** non perde la strategia di generazione.
+
+---
+
+## Supporto PostgreSQL json/jsonb
+
+Per colonne con `jdbcTypeName` `json` o `jsonb`:
+- tipo Java in **Entity/DTO/Resource**: `Map<String, Object>`
+- in Entity vengono aggiunte:
+  - `@Column(columnDefinition = "jsonb")` (o `"json"`)
+  - `@JdbcTypeCode(SqlTypes.JSON)` (Hibernate 6)
+
+Questo evita errori del tipo:
+
+> column "metadata" is of type jsonb but expression is of type character varying
+
+---
+
+## Modalità di utilizzo
+
+### 1) DB → (YAML opzionale) → Code
+- Il tool chiede i parametri di connessione
+- Si connette al DB e mostra l’elenco degli **schema** (se disponibile)
+- Dopo la scelta dello schema, mostra l’elenco dei **catalog** (se disponibile)
+- Introspeziona tabelle/colonne/PK/FK
+- Opzionalmente:
+  - scrive lo YAML
+  - genera subito il codice
+
+### 2) YAML → Code (senza connessione al DB per generare)
+- Fornisci un file YAML
+- Il tool genera il codice usando lo YAML come sorgente di verità
+- Lo YAML **non** contiene credenziali o URL di connessione
+
+---
+
+## Build del tool
+
+Requisiti:
+- Java 21+
+- Maven 3.9+
+
+Build:
+
+```bash
+mvn clean install -DskipTests
+```
+
+Esecuzione:
+
+```bash
+java -jar target/sword-0.1.0-SNAPSHOT.jar
+```
+
+---
+
+## Wizard CLI: cosa chiede
+
+### Avvio
+All’avvio il wizard chiede se hai già uno YAML:
+
+- `N` → modalità DB → YAML/Code
+- `Y` → modalità YAML → Code
+
+### Modalità DB
+1. DB type (PostgreSQL / MariaDB / MySQL / …)
+2. host / port (default per DB) / database / username / password (password non visibile)
+3. dopo la connessione:
+   - elenco **schema** (scegli per numero o nome)
+   - elenco **catalog** (scegli per numero o nome)
+4. table pattern (`%` default)
+5. include views (Y/N)
+6. output directory + base package
+7. scrittura YAML (opzionale)
+8. generazione codice (opzionale)
+
+### Modalità YAML
+1. path YAML
+2. output directory (default da YAML se presente)
+3. base package (default da YAML)
+4. generazione codice
+
+---
+
+## YAML: struttura essenziale
+
+Lo YAML descrive:
+- `model` (basePackage, schema/catalog usati per la generazione JPA)
+- `tables` (columns, PK, FK)
+- `naming` (override per entity/dto/resource e per property names)
+- `resourceOverrides` (override opzionali lato resource: rename e/o type)
+
+Esempio minimale (estratto):
 
 ```yaml
+model:
+  basePackage: org.example.generated
+  schema: ecommerce
+
 tables:
-  USERS:
-    entity: User
+  - name: reviews
+    primaryKeyColumns: [ id ]
     columns:
-      ID_USER: idUser
-      FIRST_NAME: firstName
-      LAST_NAME: lastName
+      - name: id
+        propertyName: id
+        jdbcTypeName: int4
+        nullable: false
+        autoIncrement: true
+        idGeneration: IDENTITY
+      - name: metadata
+        propertyName: metadata
+        jdbcTypeName: jsonb
+        nullable: true
 ```
 
-For more advanced mapping between DTOs and Resources:
-
-```yaml
-tables:
-  USERS:
-    entity: User
-    columns:
-      FIRST_NAME:
-        dto: firstName
-        resource: givenName
-      LAST_NAME:
-        dto: lastName
-        resource: familyName
-```
-
-If a structured mapping is used (with `dto:` and `resource:`), S.W.O.R.D. will generate
-different field names and wire them automatically inside the generated `XResourceMapper`.
+> Importante: nello YAML **non** ci sono informazioni di connessione al DB.
 
 ---
 
-## 5. DTOs and mappers
+## Output generato
 
-Each entity has:
-- A DTO class under `...dtos`
-- A DTO mapper under `...mappers`
+Il tool genera (in base al tuo `basePackage`):
+- Entities + EmbeddedId
+- DTO
+- Resource
+- Repository (Spring Data JPA)
+- Service (DTO)
+- Controller (Resource)
+- MapStruct mappers (Entity<->DTO, DTO<->Resource)
 
-Example DTO:
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-@Generated(...)
-public class UserDto {
-    private Long idUser;
-    private String firstName;
-    private String lastName;
-    private Boolean active;
-}
-```
-
-Example mapper:
-
-```java
-@Mapper(componentModel = "spring")
-@Generated(...)
-public interface UserMapper {
-    UserDto toDto(User entity);
-    User toEntity(UserDto dto);
-}
-```
-
-Rules:
-- DTOs mirror entity fields (excluding `@OneToMany`, `@ManyToMany`).
-- FKs are represented as scalar IDs.
+### Endpoint REST
+- PK singola:
+  - `GET /{resource}/{id}`
+  - `PUT /{resource}/{id}`
+  - `DELETE /{resource}/{id}`
+- PK composta:
+  - `GET /{resource}/{pk1}/{pk2} ...`
+  - `PUT /{resource}/{pk1}/{pk2} ...`
+  - `DELETE /{resource}/{pk1}/{pk2} ...`
 
 ---
 
-## 6. Repositories
+## Troubleshooting
 
-If enabled, each entity generates a Spring Data repository under `...repositories`.
+### 1) JSONB: “expression is of type character varying”
+Verifica che nella Entity generata sul campo json/jsonb ci siano:
+- `@Column(columnDefinition = "jsonb")`
+- `@JdbcTypeCode(SqlTypes.JSON)`
+e che il tipo Java sia `Map<String, Object>`.
 
-Example:
+### 2) Spring Boot prova ad autoconfigurare il DataSource del tool
+Se vedi errori come:
+> Failed to configure a DataSource: 'url' attribute is not specified
 
-```java
-@Repository
-@Generated(...)
-public interface UsersRepository extends JpaRepository<User, Long> {
-    Page<User> findByFirstName(String firstName, Pageable pageable);
-    Page<User> findByActive(Boolean active, Pageable pageable);
-}
-```
+assicurati che il tool non abbia configurazioni `spring.datasource.*` obbligatorie e che il wizard crei il DataSource **programmaticamente**.
 
-- One finder per non-PK scalar column.
-- PK and relation fields are excluded.
-- All methods return `Page<Entity>`.
+### 3) “no main manifest attribute”
+Costruisci il jar con Maven (Spring Boot repackage):
 
----
-
-## 7. Services
-
-If enabled, each entity has a corresponding Service class under `...services`.
-
-Example:
-
-```java
-@Service
-@RequiredArgsConstructor
-@Generated(...)
-public class UsersService {
-
-    private final UsersRepository repository;
-    private final UserMapper mapper;
-
-    public PageDto<UserDto> findAll(int pageNumber, int maxRecordsPerPage) { ... }
-    public UserDto findById(Long id) { ... } // returns null if not found
-    public UserDto save(UserDto dto) { ... }
-    public UserDto update(Long id, UserDto dto) { ... }
-    public void delete(Long id) { ... }
-}
-```
-
-A shared `PageDto<T>` class is generated:
-
-```java
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-@Generated(...)
-public class PageDto<T> {
-    private List<T> content;
-    private int pageNumber;
-    private int pageSize;
-    private long totalElements;
-    private int totalPages;
-}
+```bash
+mvn clean package
+java -jar target/sword-0.1.0-SNAPSHOT.jar
 ```
 
 ---
 
-## 8. Resources and Resource Mappers
-
-### 8.1 Resource classes
-
-Each entity gets a REST resource representation under `...resources`.
-
-Example:
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-@Generated(...)
-public class UserResource {
-    private Long idUser;
-    private String firstName;
-    private String lastName;
-    private Boolean active;
-}
-```
-
-### 8.2 PageResource
-
-REST APIs return paginated responses using `PageResource<T>`:
-
-```java
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-@Generated(...)
-public class PageResource<T> {
-    private List<T> content;
-    private int pageNumber;
-    private int pageSize;
-    private long totalElements;
-    private int totalPages;
-}
-```
-
-### 8.3 ResourceMapper
-
-Generated per entity as `XResourceMapper`, using `default` methods:
-
-```java
-@Mapper(componentModel = "spring")
-@Generated(...)
-public interface UserResourceMapper {
-
-    default UserResource toResource(UserDto dto) {
-        if (dto == null) return null;
-        UserResource res = new UserResource();
-        res.setIdUser(dto.getIdUser());
-        res.setFirstName(dto.getFirstName());
-        res.setLastName(dto.getLastName());
-        res.setActive(dto.getActive());
-        return res;
-    }
-
-    default UserDto toDto(UserResource resource) {
-        if (resource == null) return null;
-        UserDto dto = new UserDto();
-        dto.setIdUser(resource.getIdUser());
-        dto.setFirstName(resource.getFirstName());
-        dto.setLastName(resource.getLastName());
-        dto.setActive(resource.getActive());
-        return dto;
-    }
-}
-```
-
-This explicit body generation allows S.W.O.R.D. to support YAML‑defined renames between DTO and Resource fields.
-
----
-
-## 9. Controllers
-
-Each entity’s controller (e.g., `UsersController`) lives under `...controllers`.
-
-Endpoints:
-
-```java
-// GET /api/users?pageNumber=&maxRecordsPerPage=
-ResponseEntity<PageResource<UserResource>> findAll(...)
-
-// GET /api/users/{id}
-ResponseEntity<UserResource> findById(...)
-
-// POST /api/users
-ResponseEntity<UserResource> create(@RequestBody UserResource resource)
-
-// PUT /api/users/{id}
-ResponseEntity<UserResource> update(@PathVariable id, @RequestBody UserResource resource)
-
-// DELETE /api/users/{id}
-ResponseEntity<Void> delete(@PathVariable id)
-
-// GET /api/users/by/firstName/{value}?pageNumber=&maxRecordsPerPage=
-ResponseEntity<PageResource<UserResource>> findByFirstName(...)
-```
-
-Controllers delegate to their corresponding Services and handle mapping between DTOs and Resources.
-
----
-
-## 10. Package layout
-
-Example base package: `org.cheetah.fracas.entities`
-
-```
-org.cheetah.fracas.entities       → Entities
-org.cheetah.fracas.dtos           → DTOs
-org.cheetah.fracas.mappers        → DTO Mappers
-org.cheetah.fracas.repositories   → Repositories
-org.cheetah.fracas.services       → Services + PageDto
-org.cheetah.fracas.resources      → Resources + PageResource + ResourceMappers
-org.cheetah.fracas.controllers    → REST Controllers
-```
-
----
-
-## 11. Summary
-
-S.W.O.R.D. builds an end-to-end Spring Boot structure directly from a database schema.
-
-You can choose:
-- Which layers to generate (Entity, DTO, Repository, Service, Controller)
-- Whether to use scalar or relational FKs
-- Lazy or eager fetch for relations
-- Custom names through YAML mapping
-
-Each generated class is annotated with `@Generated("S.W.O.R.D.")` and safely overwritable in future regenerations.
+## Note
+- La distinzione tra **schema** e **catalog** varia tra DB e driver JDBC: il wizard prova a listare entrambi con `DatabaseMetaData` e mantiene fallback manuale.
+- La determinazione ONE_TO_ONE vs MANY_TO_ONE è best-effort (dipende da PK/unique indexes e metadati del driver).
