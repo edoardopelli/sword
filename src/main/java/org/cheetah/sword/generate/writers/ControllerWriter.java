@@ -9,10 +9,13 @@ import org.cheetah.sword.generate.TypeResolver;
 import org.cheetah.sword.model.ColumnModel;
 import org.cheetah.sword.model.TableModel;
 import org.cheetah.sword.util.NameUtil;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -23,8 +26,11 @@ import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterSpec;
+import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
+
+import lombok.RequiredArgsConstructor;
 
 public class ControllerWriter {
 
@@ -44,33 +50,31 @@ public class ControllerWriter {
         ClassName resourceType = ClassName.get(resolver.resourcesPackage(), resolver.resourceSimpleName(table));
 
         FieldSpec service = FieldSpec.builder(serviceType, "service",
-                javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.FINAL).build();
+                        javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.FINAL)
+                .build();
         FieldSpec mapper = FieldSpec.builder(resourceMapperType, "mapper",
-                javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.FINAL).build();
-
-        MethodSpec ctor = MethodSpec.constructorBuilder()
-                .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
-                .addParameter(serviceType, "service")
-                .addParameter(resourceMapperType, "mapper")
-                .addStatement("this.service = service")
-                .addStatement("this.mapper = mapper")
+                        javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.FINAL)
                 .build();
 
         String basePath = "/" + table.getName().toLowerCase();
 
         MethodSpec getById = buildGetById(resolver, table, dtoType, resourceType);
+        MethodSpec getAll = buildGetAll(dtoType, resourceType);
         MethodSpec create = buildCreate(dtoType, resourceType);
+        MethodSpec update = buildUpdate(resolver, table, dtoType, resourceType);
         MethodSpec delete = buildDelete(resolver, table);
 
         TypeSpec type = TypeSpec.classBuilder(controllerType)
                 .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
                 .addAnnotation(RestController.class)
                 .addAnnotation(AnnotationSpec.builder(RequestMapping.class).addMember("value", "$S", basePath).build())
+                .addAnnotation(RequiredArgsConstructor.class)
                 .addField(service)
                 .addField(mapper)
-                .addMethod(ctor)
                 .addMethod(getById)
+                .addMethod(getAll)
                 .addMethod(create)
+                .addMethod(update)
                 .addMethod(delete)
                 .build();
 
@@ -94,7 +98,6 @@ public class ControllerWriter {
             String path = compositePkPath(resolver, table);
             m.addAnnotation(AnnotationSpec.builder(GetMapping.class).addMember("value", "$S", path).build());
 
-            // Declare path variables in PK order.
             for (String pkColName : table.getPrimaryKeyColumns()) {
                 ColumnModel pkCol = findColumn(table, pkColName)
                         .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
@@ -106,11 +109,8 @@ public class ControllerWriter {
 
             ClassName idClass = ClassName.get(resolver.entityIdsPackage(), NameUtil.toUpperCamel(table.getName()) + "Id");
             String ctorArgs = table.getPrimaryKeyColumns().stream()
-                    .map(pkColName -> {
-                        ColumnModel pkCol = findColumn(table, pkColName)
-                                .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
-                        return resolver.columnPropertyName(table, pkCol);
-                    })
+                    .map(pkColName -> resolver.columnPropertyName(table,
+                            findColumn(table, pkColName).orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName))))
                     .collect(Collectors.joining(", "));
 
             m.addStatement("$T id = new $T($L)", idClass, idClass, ctorArgs);
@@ -119,13 +119,24 @@ public class ControllerWriter {
             return m.build();
         }
 
-        // Single PK path variable is "id"
         m.addAnnotation(AnnotationSpec.builder(GetMapping.class).addMember("value", "$S", "/{id}").build());
         TypeName idType = singlePkType(table);
         m.addParameter(pathVariable(idType, "id"));
         m.addStatement("$T dto = service.getById(id)", dtoType);
         m.addStatement("return mapper.toResource(dto)");
         return m.build();
+    }
+
+    private MethodSpec buildGetAll(ClassName dtoType, ClassName resourceType) {
+        TypeName pageOfResource = ParameterizedTypeName.get(ClassName.get(Page.class), resourceType);
+
+        return MethodSpec.methodBuilder("getAll")
+                .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
+                .returns(pageOfResource)
+                .addAnnotation(AnnotationSpec.builder(GetMapping.class).build())
+                .addParameter(ClassName.get(Pageable.class), "pageable")
+                .addStatement("return service.getAll(pageable).map(mapper::toResource)")
+                .build();
     }
 
     private MethodSpec buildCreate(ClassName dtoType, ClassName resourceType) {
@@ -138,6 +149,51 @@ public class ControllerWriter {
                 .addStatement("$T saved = service.create(dto)", dtoType)
                 .addStatement("return mapper.toResource(saved)")
                 .build();
+    }
+
+    // PUT update
+    private MethodSpec buildUpdate(NameResolver resolver, TableModel table, ClassName dtoType, ClassName resourceType) {
+        MethodSpec.Builder m = MethodSpec.methodBuilder("update")
+                .addModifiers(javax.lang.model.element.Modifier.PUBLIC)
+                .returns(resourceType);
+
+        if (table.hasCompositePrimaryKey()) {
+            String path = compositePkPath(resolver, table);
+            m.addAnnotation(AnnotationSpec.builder(PutMapping.class).addMember("value", "$S", path).build());
+
+            for (String pkColName : table.getPrimaryKeyColumns()) {
+                ColumnModel pkCol = findColumn(table, pkColName)
+                        .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
+
+                String varName = resolver.columnPropertyName(table, pkCol);
+                TypeName varType = typeResolver.toJavaType(pkCol.getJdbcType());
+                m.addParameter(pathVariable(varType, varName));
+            }
+
+            m.addParameter(requestBody(resourceType, "resource"));
+
+            ClassName idClass = ClassName.get(resolver.entityIdsPackage(), NameUtil.toUpperCamel(table.getName()) + "Id");
+            String ctorArgs = table.getPrimaryKeyColumns().stream()
+                    .map(pkColName -> resolver.columnPropertyName(table,
+                            findColumn(table, pkColName).orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName))))
+                    .collect(Collectors.joining(", "));
+
+            m.addStatement("$T id = new $T($L)", idClass, idClass, ctorArgs);
+            m.addStatement("$T dto = mapper.toDto(resource)", dtoType);
+            m.addStatement("$T saved = service.update(id, dto)", dtoType);
+            m.addStatement("return mapper.toResource(saved)");
+            return m.build();
+        }
+
+        // Single PK
+        m.addAnnotation(AnnotationSpec.builder(PutMapping.class).addMember("value", "$S", "/{id}").build());
+        TypeName idType = singlePkType(table);
+        m.addParameter(pathVariable(idType, "id"));
+        m.addParameter(requestBody(resourceType, "resource"));
+        m.addStatement("$T dto = mapper.toDto(resource)", dtoType);
+        m.addStatement("$T saved = service.update(id, dto)", dtoType);
+        m.addStatement("return mapper.toResource(saved)");
+        return m.build();
     }
 
     private MethodSpec buildDelete(NameResolver resolver, TableModel table) {
@@ -159,11 +215,8 @@ public class ControllerWriter {
 
             ClassName idClass = ClassName.get(resolver.entityIdsPackage(), NameUtil.toUpperCamel(table.getName()) + "Id");
             String ctorArgs = table.getPrimaryKeyColumns().stream()
-                    .map(pkColName -> {
-                        ColumnModel pkCol = findColumn(table, pkColName)
-                                .orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName));
-                        return resolver.columnPropertyName(table, pkCol);
-                    })
+                    .map(pkColName -> resolver.columnPropertyName(table,
+                            findColumn(table, pkColName).orElseThrow(() -> new IllegalStateException("PK column not found: " + pkColName))))
                     .collect(Collectors.joining(", "));
 
             m.addStatement("$T id = new $T($L)", idClass, idClass, ctorArgs);
@@ -192,7 +245,9 @@ public class ControllerWriter {
     private TypeName singlePkType(TableModel table) {
         if (table.hasSinglePrimaryKey()) {
             String pkColName = table.getPrimaryKeyColumns().get(0);
-            Optional<ColumnModel> pk = table.getColumns().stream().filter(c -> pkColName.equals(c.getName())).findFirst();
+            Optional<ColumnModel> pk = table.getColumns().stream()
+                    .filter(c -> pkColName.equals(c.getName()))
+                    .findFirst();
             if (pk.isPresent()) {
                 return typeResolver.toJavaType(pk.get().getJdbcType());
             }
