@@ -1,6 +1,11 @@
 package org.cheetah.sword.cli;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.sql.DataSource;
 
@@ -44,7 +49,7 @@ public class WizardRunner implements CommandLineRunner {
 			String outputDir = p.ask("Output directory",
 					spec.getGeneration() != null ? spec.getGeneration().getOutputDir() : "./generated-src");
 			DbModel model = yamlService.toDbModel(spec);
-			NameResolver resolver = new NameResolver(spec.getModel().getBasePackage(), true, null, spec.getResourceOverrides() );
+			NameResolver resolver = new NameResolver(spec.getModel().getBasePackage(), true, null, spec.getResourceOverrides());
 			codeGenerationService.generateAll(Path.of(outputDir), resolver, model);
 		} else {
 			DbType dbType = askDbType(p);
@@ -57,15 +62,16 @@ public class WizardRunner implements CommandLineRunner {
 			DbConnectionSpec cs = DbConnectionSpec.builder().dbType(dbType).host(host).port(port).database(database)
 					.username(username).password(password).build();
 
-			String schema = p.ask("Schema (blank = default)", "");
-			String catalog = p.ask("Catalog (blank = default)", "");
+			// Connect first (DataSource), then show schemas/catalogs from metadata.
+			DataSource ds = createDataSource(cs);
+
+			String schema = chooseSchema(p, ds);
+			String catalog = chooseCatalog(p, ds);
+
 			String pattern = p.ask("Table pattern (SQL LIKE, blank = %)", "%");
 			boolean includeViews = p.askYesNo("Include views?", false);
 
-			DataSource ds = createDataSource(cs);
-
-			DbModel model = dbIntrospector.introspect(ds, blankToNull(catalog), blankToNull(schema), pattern,
-					includeViews);
+			DbModel model = dbIntrospector.introspect(ds, blankToNull(catalog), blankToNull(schema), pattern, includeViews);
 
 			String basePackage = p.ask("Base package", "com.acme.generated");
 			String outputDir = p.ask("Output directory", "./generated-src");
@@ -82,6 +88,100 @@ public class WizardRunner implements CommandLineRunner {
 				codeGenerationService.generateAll(Path.of(outputDir), resolver, model);
 			}
 		}
+	}
+
+	private static String chooseSchema(ConsolePrompter p, DataSource ds) {
+		List<String> schemas = readSchemas(ds);
+
+		if (!schemas.isEmpty()) {
+			System.out.println("Available schemas:");
+			for (int i = 0; i < schemas.size(); i++) {
+				System.out.println("  " + (i + 1) + ") " + schemas.get(i));
+			}
+			System.out.println("You can type the schema name or the number from the list above.");
+		}
+
+		String input = p.ask("Schema (blank = default)", "");
+
+		// Allow numeric selection without changing the existing prompt contract.
+		String selected = resolveSelection(input, schemas);
+		return selected != null ? selected : input;
+	}
+
+	private static String chooseCatalog(ConsolePrompter p, DataSource ds) {
+		List<String> catalogs = readCatalogs(ds);
+
+		if (!catalogs.isEmpty()) {
+			System.out.println("Available catalogs:");
+			for (int i = 0; i < catalogs.size(); i++) {
+				System.out.println("  " + (i + 1) + ") " + catalogs.get(i));
+			}
+			System.out.println("You can type the catalog name or the number from the list above.");
+		}
+
+		String input = p.ask("Catalog (blank = default)", "");
+
+		// Allow numeric selection without changing the existing prompt contract.
+		String selected = resolveSelection(input, catalogs);
+		return selected != null ? selected : input;
+	}
+
+	private static String resolveSelection(String input, List<String> values) {
+		if (input == null) {
+			return null;
+		}
+		String trimmed = input.trim();
+		if (trimmed.isEmpty()) {
+			return null;
+		}
+		if (values == null || values.isEmpty()) {
+			return null;
+		}
+		try {
+			int idx = Integer.parseInt(trimmed);
+			if (idx >= 1 && idx <= values.size()) {
+				return values.get(idx - 1);
+			}
+			return null;
+		} catch (NumberFormatException ex) {
+			return null;
+		}
+	}
+
+	private static List<String> readSchemas(DataSource ds) {
+		List<String> out = new ArrayList<>();
+		try (Connection c = ds.getConnection()) {
+			DatabaseMetaData meta = c.getMetaData();
+			try (ResultSet rs = meta.getSchemas()) {
+				while (rs.next()) {
+					String s = rs.getString("TABLE_SCHEM");
+					if (s != null && !s.isBlank() && !out.contains(s)) {
+						out.add(s);
+					}
+				}
+			}
+		} catch (Exception ex) {
+			// Best effort: if schema listing fails, fallback to manual input.
+		}
+		return out;
+	}
+
+	private static List<String> readCatalogs(DataSource ds) {
+		List<String> out = new ArrayList<>();
+		try (Connection c = ds.getConnection()) {
+			DatabaseMetaData meta = c.getMetaData();
+			try (ResultSet rs = meta.getCatalogs()) {
+				while (rs.next()) {
+					String s = rs.getString("TABLE_CAT");
+					if (s != null && !s.isBlank() && !out.contains(s)) {
+						out.add(s);
+					}
+				}
+			}
+		} catch (Exception ex) {
+			// Best effort: if catalog listing fails, fallback to manual input.
+		}
+		return out;
 	}
 
 	private static DbType askDbType(ConsolePrompter p) {
@@ -108,6 +208,7 @@ public class WizardRunner implements CommandLineRunner {
 		return s == null || s.isBlank() ? null : s;
 	}
 
+	// Left as-is (legacy helper, currently not used by the YAML path because YamlService has its own mapper).
 	private static DbModel toDbModel(YamlSpec spec) {
 		DbModel.DbModelBuilder db = DbModel.builder().schema(spec.getModel().getSchema())
 				.catalog(spec.getModel().getCatalog());
